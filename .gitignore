@@ -1,0 +1,19 @@
+# build
+build/
+*.idsig
+/mtkflash.apk
+
+# keystore lokal — jangan pernah di-commit
+*.keystore
+*.jks
+*.p12
+
+# test output
+test/out/
+*.class
+
+# editor / OS
+.idea/
+.vscode/
+.DS_Store
+*~
