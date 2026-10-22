@@ -4,13 +4,6 @@ import com.rizky.mtkflash.ScatterParser;
 import java.io.File;
 import java.util.List;
 
-/**
- * Uji logika parser di JVM biasa (tanpa Android).
- *
- * Kelas ScatterParser dan DaLoader hanya memakai java.io/java.util, jadi
- * bisa diuji langsung dengan javac + java. Ini memverifikasi bagian yang
- * tidak butuh perangkat fisik.
- */
 public class ParserTest {
 
     static int pass = 0, fail = 0;
@@ -83,7 +76,7 @@ public class ParserTest {
                     d0.size + " byte");
             check("load address wajar", d0.loadAddr != 0,
                     "0x" + Integer.toHexString(d0.loadAddr));
-            // penanda MMM harus ada di awal image
+
             check("magic MMM di awal image",
                     d0.size >= 4 && (d0.data[0] & 0xFF) == 0x4D
                             && (d0.data[1] & 0xFF) == 0x4D

@@ -11,29 +11,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
-/**
- * Klien protokol Fastboot lewat USB OTG.
- *
- * Fastboot adalah protokol terbuka dari AOSP (system/core/fastboot).
- * Tidak ada autentikasi di dalamnya: perangkat yang bootloader-nya sudah
- * dibuka akan menerima perintah flash apa adanya. Karena itu jalur ini
- * tidak butuh DA, tidak butuh file auth, dan tidak butuh bypass apa pun.
- *
- * Cara mengenali antarmuka fastboot (AOSP fastboot_usb):
- *   interface class    = 0xFF (vendor specific)
- *   interface subclass = 0x42 ('B')
- *   interface protocol = 0x03
- *
- * Bentuk satu perintah:
- *   host -> "download:00001000"   (ASCII)
- *   dev  -> "DATA" + 8 digit hex  (sisa kapasitas)
- *   host -> payload biner
- *   dev  -> "OKAY"
- *   host -> "flash:boot"
- *   dev  -> "OKAY"
- *
- * Status yang mungkin: OKAY, FAIL, DATA, INFO, TEXT.
- */
 public class FastbootProtocol {
 
     private static final int IFACE_CLASS = 0xFF;
@@ -82,7 +59,6 @@ public class FastbootProtocol {
         this.epOut = out;
     }
 
-    /** True kalau perangkat ini punya antarmuka fastboot. */
     public static boolean isFastboot(UsbDevice d) {
         for (int i = 0; i < d.getInterfaceCount(); i++) {
             UsbInterface itf = d.getInterface(i);
@@ -94,8 +70,6 @@ public class FastbootProtocol {
         }
         return false;
     }
-
-    /* ------------------------------------------------------------------ */
 
     public static class Response {
         public String status;
@@ -111,7 +85,6 @@ public class FastbootProtocol {
         }
     }
 
-    /** Kirim satu perintah ASCII, kembalikan respons pertama yang bukan INFO/TEXT. */
     public Response command(String cmd) throws IOException {
         byte[] b = cmd.getBytes(StandardCharsets.US_ASCII);
         int n = connection.bulkTransfer(epOut, b, b.length, 5000);
@@ -147,9 +120,6 @@ public class FastbootProtocol {
         throw new IOException("terlalu banyak pesan INFO dari perangkat");
     }
 
-    /* ------------------------------------------------------------------ */
-
-    /** Baca variabel dari bootloader, mis. product, max-download-size, current-slot. */
     public String getVar(String name) throws IOException {
         Response r = command("getvar:" + name);
         if (!r.ok()) throw new IOException("getvar:" + name + " gagal — " + r.message);
@@ -161,15 +131,10 @@ public class FastbootProtocol {
         try {
             return Long.parseLong(v.replace("0x", ""), 16);
         } catch (NumberFormatException e) {
-            return 0x10000000L; // 256 MB, batas aman umum
+            return 0x10000000L;
         }
     }
 
-    /**
-     * Kirim satu image ke perangkat lalu tulis ke partisi.
-     *
-     * Urutan: download:<hex> -> DATA -> payload -> OKAY -> flash:<nama> -> OKAY
-     */
     public void flash(String partition, byte[] image, BromProtocol.Progress progress)
             throws IOException {
         long max = maxDownloadSize();
@@ -211,7 +176,7 @@ public class FastbootProtocol {
         try {
             command("reboot");
         } catch (IOException ignored) {
-            // perangkat langsung putus koneksi setelah reboot; ini normal
+
         }
     }
 

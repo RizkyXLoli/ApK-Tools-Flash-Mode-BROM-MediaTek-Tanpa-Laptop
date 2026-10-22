@@ -6,37 +6,11 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Pembaca file Download Agent.
- *
- * Dua bentuk yang didukung:
- *
- * 1. DA tunggal (mis. DA_PL.bin) - seluruh file adalah satu image DA.
- *
- * 2. MTK_AllInOne_DA.bin - berkas gabungan berisi banyak DA, satu per chip.
- *
- * Penanda DA di dalam berkas gabungan adalah "MMM\x01" diikuti header
- * FILE_INFO. Penanda itu juga muncul sebagai teks biasa di dalam kode
- * (mis. string "MMMUnsupported source type"), jadi pencocokan harus
- * divalidasi dengan struktur header, bukan hanya magic-nya.
- *
- * Header FILE_INFO (little endian), hasil baca langsung dari
- * MTK_AllInOne_DA.bin v3.3001:
- *
- *   +0x00  "MMM" + versi 1
- *   +0x04  ukuran header (0x38)
- *   +0x08  "FILE_INFO"
- *   +0x14  nomor versi / tipe
- *   +0x18  tipe sumber
- *   +0x1C  alamat muat (load address)
- *   +0x20  ukuran blok
- *   +0x28  ukuran header lagi
- */
 public class DaLoader {
 
     public static final int DEFAULT_LOAD_ADDR = 0x201000;
 
-    private static final int MMM_MAGIC = 0x014D4D4D; // "MMM\x01"
+    private static final int MMM_MAGIC = 0x014D4D4D;
     private static final byte[] FILE_INFO = {'F', 'I', 'L', 'E', '_', 'I', 'N', 'F', 'O'};
 
     public static class DaImage {
@@ -93,7 +67,6 @@ public class DaLoader {
         return out;
     }
 
-    /** Header sah: ukuran header wajar dan ada "FILE_INFO" di +0x08. */
     private static boolean looksLikeDaHeader(byte[] b, int off) {
         int hdr = le32(b, off + 4);
         if (hdr < 0x20 || hdr > 0x200) return false;
@@ -104,10 +77,6 @@ public class DaLoader {
         return true;
     }
 
-    /**
-     * Alamat muat di +0x1C. Kalau nilainya tidak masuk akal (nol, terlalu
-     * kecil, atau tidak sejajar 4 KB), pakai alamat standar DA MediaTek.
-     */
     private static int readLoadAddr(byte[] b, int off) {
         if (off + 0x20 > b.length) return DEFAULT_LOAD_ADDR;
         int addr = le32(b, off + 0x1C);

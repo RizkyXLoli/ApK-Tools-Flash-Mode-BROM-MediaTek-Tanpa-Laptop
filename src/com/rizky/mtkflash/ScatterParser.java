@@ -9,25 +9,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Pembaca file scatter MediaTek.
- *
- * Scatter adalah file teks (YAML sederhana) yang menjelaskan tata letak
- * partisi: nama, alamat awal, ukuran, file image, dan apakah ikut di-flash.
- *
- * Contoh satu blok:
- *
- *   - partition_index: SYS1
- *     partition_name: boot
- *     file_name: boot.img
- *     is_download: true
- *     type: NORMAL_ROM
- *     linear_start_addr: 0x8000
- *     physical_start_addr: 0x8000
- *     partition_size: 0x2000000
- *     region: EMMC_USER
- *     storage: HW_STORAGE_EMMC
- */
 public class ScatterParser {
 
     public static class Partition {
@@ -43,7 +24,6 @@ public class ScatterParser {
         public long physicalAddr = 0;
         public long size = 0;
 
-        /** True kalau partisi punya file image yang harus ditulis. */
         public boolean hasImage() {
             return fileName != null && !fileName.isEmpty()
                     && !fileName.equalsIgnoreCase("NONE");
@@ -86,7 +66,7 @@ public class ScatterParser {
                 if (s.isEmpty() || s.startsWith("#")) continue;
 
                 if (s.startsWith("- ")) {
-                    // blok baru: simpan blok sebelumnya kalau itu partisi
+
                     if (cur != null && cur.containsKey("partition_name")) {
                         sc.partitions.add(toPartition(cur));
                     }

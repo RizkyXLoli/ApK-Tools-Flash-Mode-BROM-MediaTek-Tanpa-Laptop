@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- MediaTek USB vendor ID + PID BROM / Preloader / DA -->
-    <usb-device vendor-id="3725" />            <!-- 0x0E8D -->
+
+    <usb-device vendor-id="3725" />
 </resources>

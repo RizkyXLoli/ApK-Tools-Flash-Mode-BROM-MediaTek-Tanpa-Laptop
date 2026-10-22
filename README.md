@@ -46,7 +46,7 @@ APK ada di [`release/mtkflash.apk`](release/mtkflash.apk).
 - minSdk 24 (Android 7), targetSdk 34
 - Ditandatangani keystore **debug** — untuk pemakaian sendiri, bukan
   distribusi ke Play Store
-- SHA-256: `06af74d5ff18d3ffb840c80b97aae092d8dd5847f1d31a7e0eb4d16211fa43ef`
+- SHA-256: `f8d93a9b002bf05f0e0cdeb954f37502206aad94b11b6ef8ff2d620ae425e7a3`
 
 Pasang: aktifkan "Install unknown apps" untuk file manager, lalu buka APK-nya.
 

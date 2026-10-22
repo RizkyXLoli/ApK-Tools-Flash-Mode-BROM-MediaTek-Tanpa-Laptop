@@ -5,40 +5,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
-/**
- * Lapisan protokol Boot ROM (BROM) MediaTek.
- *
- * Semua nilai perintah di bawah ini hasil baca langsung dari library
- * SP Flash Tool (libflashtool.v1.so, kelas BRom_Base dan BRom_MTxxxx),
- * bukan dari dokumentasi pihak ketiga.
- *
- * Alur satu perintah (format klasik BROM):
- *
- *   host  -> [cmd:1]
- *   dev   -> [echo cmd:1]
- *   host  -> [len:4 BE]
- *   dev   -> [echo len:4]
- *   host  -> [payload:len]
- *   dev   -> [status:2]        0x0000 = OK
- *
- * Untuk perintah baca, setelah echo len perangkat mengirim data
- * lebih dulu, baru status.
- */
 public class BromProtocol {
-
-    /* ------------------------------------------------------------------
-     * Set perintah. Dua keluarga yang ditemukan di binary:
-     *
-     *  CLASSIC  - chip lama / preloader (BRom_MT6276, MT6589)
-     *  NEW_ARCH - chip modern, termasuk MT6768/MT6769 (BRom_Base)
-     * ------------------------------------------------------------------ */
 
     public enum Proto {
         CLASSIC, NEW_ARCH
     }
 
-    // --- perintah bersama ---
-    public static final byte CMD_HANDSHAKE       = (byte) 0xA0; // sinkronisasi awal
+    public static final byte CMD_HANDSHAKE       = (byte) 0xA0;
     public static final byte CMD_GET_BROM_VER    = (byte) 0xFE;
     public static final byte CMD_GET_HW_CODE     = (byte) 0xFD;
     public static final byte CMD_GET_HW_SW_VER   = (byte) 0xFC;
@@ -48,7 +21,6 @@ public class BromProtocol {
     public static final byte CMD_JUMP_BL         = (byte) 0xD6;
     public static final byte CMD_GET_FW_VER      = (byte) 0xBF;
 
-    // --- khusus NEW_ARCH (BRom_Base) ---
     public static final byte NA_WRITE16          = (byte) 0xA1;
     public static final byte NA_READ16           = (byte) 0xA2;
     public static final byte NA_CHECKSUM16       = (byte) 0xA4;
@@ -59,14 +31,12 @@ public class BromProtocol {
     public static final byte NA_BL_READY         = (byte) 0xB8;
     public static final byte NA_WRITE32          = (byte) 0xD4;
 
-    // --- khusus CLASSIC (BRom_MT6276) ---
     public static final byte CL_READ16           = (byte) 0xD0;
     public static final byte CL_READ32           = (byte) 0xD1;
     public static final byte CL_WRITE16          = (byte) 0xD2;
     public static final byte CL_WRITE16_NOECHO   = (byte) 0xD3;
     public static final byte CL_WRITE32          = (byte) 0xD4;
 
-    /** Ukuran potongan data saat mengunggah DA. */
     public static final int DA_CHUNK = 0x1000;
 
     private final UsbTransport usb;
@@ -86,15 +56,6 @@ public class BromProtocol {
         return proto;
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  Sinkronisasi                                                       */
-    /* ------------------------------------------------------------------ */
-
-    /**
-     * Handshake: kirim byte 0xA0 berulang sampai perangkat menjawab.
-     * BROM hanya menerima satu byte pada satu waktu dan menggemakannya
-     * kembali; status 0 berarti siap menerima perintah.
-     */
     public void handshake(int attempts) throws IOException {
         log.i("handshake: kirim 0xA0 (maks " + attempts + " kali)");
         for (int i = 0; i < attempts; i++) {
@@ -110,24 +71,16 @@ public class BromProtocol {
                     return;
                 }
             } catch (IOException e) {
-                // belum siap; ulangi
+
             }
         }
         throw new IOException("handshake gagal: perangkat tidak menjawab 0xA0");
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  Perintah dasar                                                     */
-    /* ------------------------------------------------------------------ */
-
     private static int status(byte[] b) {
         return ((b[0] & 0xFF) << 8) | (b[1] & 0xFF);
     }
 
-    /**
-     * Kirim satu perintah tanpa payload, lalu baca {@code readLen} byte
-     * data (kalau ada) dan status 2 byte di akhir.
-     */
     public byte[] command(byte cmd, byte[] payload, int readLen) throws IOException {
         usb.write(new byte[]{cmd});
         byte[] echo = usb.read(1);
@@ -162,7 +115,6 @@ public class BromProtocol {
         return data;
     }
 
-    /** Perintah tulis tanpa menunggu data balik. */
     public void commandWrite(byte cmd, byte[] payload) throws IOException {
         command(cmd, payload, 0);
     }
@@ -176,10 +128,6 @@ public class BromProtocol {
     private static int le32(byte[] b, int off) {
         return ByteBuffer.wrap(b, off, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
     }
-
-    /* ------------------------------------------------------------------ */
-    /*  Informasi chip                                                     */
-    /* ------------------------------------------------------------------ */
 
     public int getBromVersion() throws IOException {
         byte[] r = command(CMD_GET_BROM_VER, null, 2);
@@ -195,7 +143,6 @@ public class BromProtocol {
         return v;
     }
 
-    /** Mengembalikan {hw_sub_code, hw_version, sw_version}. */
     public int[] getHwSwVersion() throws IOException {
         byte[] r = command(CMD_GET_HW_SW_VER, null, 8);
         int hwSub = ((r[0] & 0xFF) << 8) | (r[1] & 0xFF);
@@ -207,7 +154,6 @@ public class BromProtocol {
         return new int[]{hwSub, hwVer, swVer};
     }
 
-    /** Target config: 4 byte, mis. SBC/DA mode dan storage. */
     public int getTargetConfig() throws IOException {
         byte[] r = command(CMD_GET_TARGET_CFG, null, 4);
         int v = ((r[0] & 0xFF) << 24) | ((r[1] & 0xFF) << 16)
@@ -216,18 +162,6 @@ public class BromProtocol {
         return v;
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  Unggah Download Agent                                              */
-    /* ------------------------------------------------------------------ */
-
-    /**
-     * Unggah DA ke SRAM perangkat.
-     *
-     * Format perintah 0xD7:
-     *   [addr:4 BE][len:4 BE][sig_len:4 BE][data:len][checksum:2]
-     *
-     * Checksum = jumlah semua byte data modulo 0x10000.
-     */
     public void sendDa(int addr, byte[] da, int sigLen, Progress p) throws IOException {
         log.i(String.format("kirim DA: %d byte ke 0x%08X", da.length, addr));
 
@@ -244,7 +178,6 @@ public class BromProtocol {
         usb.write(head);
         usb.read(12);
 
-        // kirim isi DA per potongan
         int off = 0;
         while (off < da.length) {
             int chunk = Math.min(DA_CHUNK, da.length - off);
@@ -274,21 +207,15 @@ public class BromProtocol {
         log.i("DA terkirim, checksum 0x" + Integer.toHexString(sum).toUpperCase());
     }
 
-    /** Lompat ke DA yang sudah diunggah. */
     public void jumpDa(int addr) throws IOException {
         log.i(String.format("JUMP_DA ke 0x%08X", addr));
         commandWrite(CMD_JUMP_DA, be32(addr));
     }
 
-    /** Lompat ke preloader (bootloader kedua). */
     public void jumpBl() throws IOException {
         log.i("JUMP_BL");
         commandWrite(CMD_JUMP_BL, new byte[]{0});
     }
-
-    /* ------------------------------------------------------------------ */
-    /*  Baca / tulis memori langsung (dipakai untuk dump dan patch)         */
-    /* ------------------------------------------------------------------ */
 
     public byte[] read16(int addr, int len) throws IOException {
         byte cmd = proto == Proto.NEW_ARCH ? NA_READ16 : CL_READ16;

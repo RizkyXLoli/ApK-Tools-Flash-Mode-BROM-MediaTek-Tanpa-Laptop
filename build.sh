@@ -1,20 +1,10 @@
 #!/bin/bash
-# ============================================================================
-# build.sh — bangun APK MTK Flash tanpa Gradle
-#
-# Butuh: Android SDK (build-tools 35.0.0, platform android-34) + JDK 17/21.
-# Semua tool dipanggil langsung: aapt2, javac, d8, zipalign, apksigner.
-#
-# Pakai:
-#   ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
-#   ANDROID_HOME=/opt/android-sdk ./build.sh
-# ============================================================================
+
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/opt/android-sdk}}"
 
-# build-tools: ambil versi tertinggi yang tersedia
 if [ -d "$SDK/build-tools" ]; then
   BT="$SDK/build-tools/$(ls -1 "$SDK/build-tools" | sort -V | tail -1)"
 else
@@ -22,7 +12,6 @@ else
   exit 1
 fi
 
-# platform: pakai android-34 kalau ada, kalau tidak ambil tertinggi
 if [ -f "$SDK/platforms/android-34/android.jar" ]; then
   PLATFORM="$SDK/platforms/android-34/android.jar"
 else
@@ -34,7 +23,6 @@ if [ -z "${PLATFORM:-}" ] || [ ! -f "$PLATFORM" ]; then
   exit 1
 fi
 
-# JAVA_HOME: pakai yang di-set, kalau tidak cari JDK 21/17
 if [ -z "${JAVA_HOME:-}" ] || [ ! -x "$JAVA_HOME/bin/javac" ]; then
   for j in /usr/lib/jvm/java-21-openjdk-amd64 /usr/lib/jvm/java-17-openjdk-amd64; do
     [ -x "$j/bin/javac" ] && { JAVA_HOME="$j"; break; }
@@ -93,7 +81,7 @@ echo "=== 6. zipalign ==="
 "$BT/zipalign" -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 
 echo "=== 7. tanda tangan ==="
-# Keystore debug dibuat lokal dan TIDAK ikut di-commit (lihat .gitignore).
+
 KS="$SRC/debug.keystore"
 if [ ! -f "$KS" ]; then
   "$JAVA_HOME/bin/keytool" -genkeypair -v \

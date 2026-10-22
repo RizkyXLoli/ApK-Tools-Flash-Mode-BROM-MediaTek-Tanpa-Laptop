@@ -8,26 +8,15 @@ import android.hardware.usb.UsbManager;
 
 import java.io.IOException;
 
-/**
- * Transport USB mentah untuk perangkat MediaTek.
- *
- * Menyediakan dua operasi dasar yang dipakai seluruh lapisan protokol:
- *   - write(byte[])  -> bulk OUT
- *   - read(int, int) -> bulk IN dengan timeout
- *
- * Semua perangkat MediaTek BROM memakai VID 0x0E8D dan satu interface
- * dengan sepasang endpoint bulk.
- */
 public class UsbTransport {
 
     public static final int MTK_VID = 0x0E8D;
 
-    /** PID yang dikenal: BROM, preloader, DA, dan beberapa varian lama. */
     public static final int[] MTK_PIDS = {
-            0x0003, // BROM
+            0x0003,
             0x0004,
             0x0006,
-            0x2000, // Preloader
+            0x2000,
             0x2001,
             0x201C,
             0x201D,
@@ -89,7 +78,6 @@ public class UsbTransport {
         return timeoutMs;
     }
 
-    /** Tulis seluruh buffer ke endpoint OUT. */
     public void write(byte[] data) throws IOException {
         write(data, data.length);
     }
@@ -106,10 +94,6 @@ public class UsbTransport {
         }
     }
 
-    /**
-     * Baca tepat {@code len} byte. Melempar IOException kalau timeout,
-     * karena protokol BROM tidak punya cara melanjutkan setelah paket hilang.
-     */
     public byte[] read(int len, int timeout) throws IOException {
         byte[] out = new byte[len];
         int off = 0;
@@ -130,7 +114,6 @@ public class UsbTransport {
         return read(len, timeoutMs);
     }
 
-    /** Buang sisa data di endpoint IN (dipakai setelah error). */
     public void drain() {
         byte[] buf = new byte[4096];
         for (int i = 0; i < 8; i++) {

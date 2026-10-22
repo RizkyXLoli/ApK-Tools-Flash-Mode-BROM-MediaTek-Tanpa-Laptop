@@ -38,15 +38,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * Antarmuka utama MTK Flash.
- *
- * Alur kerja mengikuti SP Flash Tool:
- *   1. sambungkan HP dalam mode BROM lewat OTG
- *   2. connect  -> handshake, baca identitas chip
- *   3. unggah DA -> perangkat pindah ke mode Download Agent
- *   4. pilih scatter + folder image -> flash
- */
 public class MainActivity extends Activity implements BromProtocol.Log {
 
     private static final String ACTION_USB_PERM = "com.rizky.mtkflash.USB_PERMISSION";
@@ -96,8 +87,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         }
     };
 
-    /* ------------------------------------------------------------------ */
-
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -130,10 +119,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         closeTransport();
         super.onDestroy();
     }
-
-    /* ------------------------------------------------------------------ */
-    /*  UI                                                                 */
-    /* ------------------------------------------------------------------ */
 
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
@@ -232,10 +217,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         return (int) (v * getResources().getDisplayMetrics().density);
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  Log                                                                */
-    /* ------------------------------------------------------------------ */
-
     @Override
     public void i(String s) {
         log(s);
@@ -264,10 +245,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private void toast(String s) {
         ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
     }
-
-    /* ------------------------------------------------------------------ */
-    /*  Perangkat                                                          */
-    /* ------------------------------------------------------------------ */
 
     private void refreshDeviceList() {
         Map<String, UsbDevice> devs = usbManager.getDeviceList();
@@ -337,10 +314,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             log("koneksi ditutup");
         }
     }
-
-    /* ------------------------------------------------------------------ */
-    /*  Aksi                                                               */
-    /* ------------------------------------------------------------------ */
 
     private void doChipInfo() {
         if (brom == null) {
@@ -464,15 +437,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         });
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  Fastboot lewat OTG                                                 */
-    /* ------------------------------------------------------------------ */
-
-    /**
-     * Fastboot tidak butuh DA, auth, atau bypass. Yang dibutuhkan hanya
-     * bootloader yang sudah dibuka. Ini jalur resmi untuk mem-flash
-     * partisi setelah unlock.
-     */
     private void doFastbootScan() {
         UsbDevice found = null;
         for (UsbDevice d : usbManager.getDeviceList().values()) {
@@ -562,10 +526,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         });
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  Berkas                                                             */
-    /* ------------------------------------------------------------------ */
-
     private File scatterFile() {
         return new File(scatterPath);
     }
@@ -650,10 +610,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         } catch (InterruptedException ignored) {
         }
     }
-
-    /* ------------------------------------------------------------------ */
-    /*  Utilitas thread                                                    */
-    /* ------------------------------------------------------------------ */
 
     private interface Job {
         Object run() throws Exception;
