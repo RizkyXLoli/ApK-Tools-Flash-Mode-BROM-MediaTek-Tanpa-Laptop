@@ -1,8 +1,10 @@
 package com.rizky.mtkflash;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Locale;
 
 public class DaProtocol {
 
@@ -138,6 +140,46 @@ public class DaProtocol {
             throw new IOException(String.format("baca tabel partisi gagal, status %04X", s));
         }
         return out;
+    }
+
+    public long readBack(long addr, long len, OutputStream out, BromProtocol.Progress p)
+            throws IOException {
+        if (len <= 0) return 0;
+        log.i(String.format(Locale.US, "readback 0x%08X len 0x%X", addr, len));
+
+        ByteBuffer b = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN);
+        b.putInt((int) addr);
+        b.putInt((int) len);
+        b.putInt(0);
+
+        byte[] head = new byte[5];
+        head[0] = CMD_READ_BACK;
+        int n = b.array().length;
+        head[1] = (byte) n;
+        head[2] = (byte) (n >>> 8);
+        head[3] = (byte) (n >>> 16);
+        head[4] = (byte) (n >>> 24);
+        usb.write(head);
+        usb.write(b.array());
+
+        long done = 0;
+        while (done < len) {
+            int chunk = (int) Math.min(DATA_CHUNK, len - done);
+            byte[] buf = usb.read(chunk);
+            byte[] st = usb.read(2);
+            int s = ((st[0] & 0xFF) << 8) | (st[1] & 0xFF);
+            if (s != 0) {
+                throw new IOException(String.format(Locale.US,
+                        "readback berhenti di 0x%08X, status %04X", addr + done, s));
+            }
+            out.write(buf, 0, chunk);
+            done += chunk;
+            if (p != null) {
+                p.onProgress((int) (done * 100L / len),
+                        FastbootProtocol.human(done) + " / " + FastbootProtocol.human(len));
+            }
+        }
+        return done;
     }
 
     public void finish() throws IOException {

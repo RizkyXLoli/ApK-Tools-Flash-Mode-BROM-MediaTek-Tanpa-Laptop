@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.net.Uri;
@@ -17,17 +18,21 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.DocumentsContract;
+import android.text.TextUtils;
 import android.text.method.ScrollingMovementMethod;
+import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
-import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -48,6 +53,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private static final int REQ_TREE = 1001;
     private static final int REQ_SCATTER = 1002;
     private static final int REQ_DUMP = 1003;
+    private static final int REQ_DA = 1004;
+    private static final int REQ_BROM_OUT = 1005;
 
     private static final Set<String> BROM_ONLY = new HashSet<>(Arrays.asList(
             "preloader", "pgpt", "sgpt", "boot_para", "nvram", "nvdata", "nvcfg",
@@ -83,6 +90,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private Uri treeUri;
     private Uri scatterUri;
     private final List<String> dumpQueue = new ArrayList<>();
+    private byte[] daData;
+    private String daName = "";
     private ScatterParser.Scatter scatter;
     private final List<Row> rows = new ArrayList<>();
 
@@ -228,7 +237,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         root.addView(row(
                 btn("Connect BROM", this::doConnectBrom),
                 btn("Info chip", this::doChipInfo),
-                btn("Dump partisi", this::startDump)));
+                btn("Dump partisi", this::startDump),
+                btn("Dump BROM", this::startBromDump)));
 
         return root;
     }
@@ -238,22 +248,71 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         b.setText(text);
         b.setAllCaps(false);
         b.setTextSize(11);
+        b.setTextColor(Color.parseColor("#dfe6f2"));
+        b.setBackground(cellBg("#1c2230", "#2c3547"));
+        b.setStateListAnimator(null);
+        b.setIncludeFontPadding(false);
+        b.setGravity(Gravity.CENTER);
         b.setOnClickListener(v -> action.run());
         return b;
     }
 
+    private GradientDrawable cellBg(String fill, String stroke) {
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.RECTANGLE);
+        d.setCornerRadius(dp(6));
+        d.setColor(Color.parseColor(fill));
+        d.setStroke(dp(1), Color.parseColor(stroke));
+        return d;
+    }
+
     private View row(Button... buttons) {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        l.setPadding(0, dp(4), 0, dp(4));
-        for (Button b : buttons) {
-            b.setLayoutParams(new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-            l.addView(b);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        int perRow = buttons.length <= 3 ? Math.max(1, buttons.length) : 3;
+        LinearLayout line = null;
+        for (int i = 0; i < buttons.length; i++) {
+            if (i % perRow == 0) {
+                line = new LinearLayout(this);
+                line.setOrientation(LinearLayout.HORIZONTAL);
+                line.setLayoutParams(new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+                box.addView(line);
+            }
+            Button b = buttons[i];
+            b.setLayoutParams(cellParams());
+            b.setMinWidth(0);
+            b.setMinimumWidth(0);
+            b.setMinHeight(0);
+            b.setMinimumHeight(0);
+            b.setAllCaps(false);
+            b.setTextSize(11);
+            b.setMaxLines(2);
+            b.setEllipsize(TextUtils.TruncateAt.END);
+            b.setGravity(Gravity.CENTER);
+            b.setPadding(dp(4), dp(2), dp(4), dp(2));
+            b.setIncludeFontPadding(false);
+            line.addView(b);
         }
-        HorizontalScrollView h = new HorizontalScrollView(this);
-        h.addView(l);
-        return h;
+
+        int sisa = buttons.length % perRow;
+        if (line != null && sisa != 0) {
+            for (int i = 0; i < perRow - sisa; i++) {
+                View spacer = new View(this);
+                spacer.setLayoutParams(cellParams());
+                line.addView(spacer);
+            }
+        }
+        return box;
+    }
+
+    private LinearLayout.LayoutParams cellParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        return lp;
     }
 
     private int dp(int v) {
@@ -329,6 +388,10 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             } catch (Exception ignored) {
             }
             doDump(u);
+        } else if (req == REQ_DA) {
+            loadDa(u);
+        } else if (req == REQ_BROM_OUT) {
+            doBromDump(u);
         }
     }
 
@@ -468,45 +531,90 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         return best != null ? best : xml;
     }
 
+    private static final int COL_CHECK = 40;
+    private static final float W_NAME = 15f;
+    private static final float W_FILE = 22f;
+    private static final float W_SIZE = 11f;
+
     private void buildTable() {
         tableBox.removeAllViews();
         if (scatter == null) return;
 
-        TextView head = new TextView(this);
-        head.setText("   partisi         image                        ukuran");
-        head.setTextColor(Color.parseColor("#6f7c93"));
-        head.setTextSize(9);
-        head.setTypeface(Typeface.MONOSPACE);
-        head.setPadding(dp(4), dp(6), dp(4), dp(4));
-        tableBox.addView(head);
-
-        for (Row r : rows) {
-            CheckBox cb = new CheckBox(this);
-            cb.setTextSize(10);
-            cb.setTypeface(Typeface.MONOSPACE);
-            cb.setPadding(dp(2), dp(2), dp(2), dp(2));
-
-            boolean usable = r.file != null && !r.blocked;
-            cb.setTextColor(Color.parseColor(usable ? "#dfe6f2" : "#5d6779"));
-
-            String size = "-";
-            if (r.file != null) {
-                size = r.file.size > 0 ? FastbootProtocol.human(r.file.size) : "?";
-            }
-            String line = String.format(Locale.US, "%-14s %-24s %8s",
-                    r.p.name,
-                    r.p.fileName == null || r.p.fileName.isEmpty() ? "-" : r.p.fileName,
-                    size);
-            if (!r.note.isEmpty()) line = line + "  " + r.note;
-            cb.setText(line);
-
-            cb.setEnabled(usable);
-            cb.setChecked(usable && r.p.download);
-            cb.setOnCheckedChangeListener((v, checked) -> updateFlashBtn());
-            r.cb = cb;
-            tableBox.addView(cb);
+        tableBox.addView(tableHead());
+        for (int i = 0; i < rows.size(); i++) {
+            tableBox.addView(tableRow(rows.get(i), i % 2 == 1));
         }
         updateFlashBtn();
+    }
+
+    private View tableHead() {
+        LinearLayout h = new LinearLayout(this);
+        h.setOrientation(LinearLayout.HORIZONTAL);
+        h.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
+        h.setBackgroundColor(Color.parseColor("#1d2431"));
+        h.addView(cell("", COL_CHECK, 0f, Gravity.START, "#7d8aa0", 9));
+        h.addView(cell("partisi", 0, W_NAME, Gravity.START, "#7d8aa0", 9));
+        h.addView(cell("image", 0, W_FILE, Gravity.START, "#7d8aa0", 9));
+        h.addView(cell("ukuran", 0, W_SIZE, Gravity.END, "#7d8aa0", 9));
+        return h;
+    }
+
+    private View tableRow(Row r, boolean alt) {
+        LinearLayout line = new LinearLayout(this);
+        line.setOrientation(LinearLayout.HORIZONTAL);
+        line.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(36)));
+        line.setBackgroundColor(Color.parseColor(alt ? "#1a1f29" : "#171b22"));
+
+        boolean usable = r.file != null && !r.blocked;
+
+        CheckBox cb = new CheckBox(this);
+        cb.setLayoutParams(new LinearLayout.LayoutParams(
+                dp(COL_CHECK), ViewGroup.LayoutParams.MATCH_PARENT));
+        cb.setText("");
+        cb.setPadding(dp(2), 0, 0, 0);
+        cb.setEnabled(usable);
+        cb.setChecked(usable && r.p.download);
+        cb.setOnCheckedChangeListener((v, checked) -> updateFlashBtn());
+        r.cb = cb;
+        line.addView(cb);
+
+        String size = "-";
+        if (r.file != null) {
+            size = r.file.size > 0 ? FastbootProtocol.human(r.file.size) : "?";
+        }
+        String img = r.p.fileName == null || r.p.fileName.isEmpty() ? "-" : r.p.fileName;
+        if (!r.note.isEmpty()) img = img + " " + r.note;
+
+        line.addView(cell(r.p.name, 0, W_NAME, Gravity.START,
+                usable ? "#dfe6f2" : "#5d6779", 10));
+        line.addView(cell(img, 0, W_FILE, Gravity.START,
+                usable ? "#9fb0c6" : "#4f596b", 10));
+        line.addView(cell(size, 0, W_SIZE, Gravity.END,
+                usable ? "#8fd3a0" : "#4f596b", 10));
+
+        line.setOnClickListener(v -> {
+            if (cb.isEnabled()) cb.toggle();
+        });
+        return line;
+    }
+
+    private TextView cell(String text, int fixedDp, float weight, int gravity,
+                          String color, int sizeSp) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextSize(sizeSp);
+        t.setTypeface(Typeface.MONOSPACE);
+        t.setTextColor(Color.parseColor(color));
+        t.setGravity(gravity | Gravity.CENTER_VERTICAL);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setIncludeFontPadding(false);
+        t.setPadding(dp(3), 0, dp(3), 0);
+        t.setLayoutParams(new LinearLayout.LayoutParams(
+                fixedDp > 0 ? dp(fixedDp) : 0, ViewGroup.LayoutParams.MATCH_PARENT, weight));
+        return t;
     }
 
     private void pickMode() {
@@ -898,6 +1006,162 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         if (mtk > 0 || fb > 0) {
             log(String.format(Locale.US, "USB: %d MediaTek, %d fastboot", mtk, fb));
         }
+    }
+
+    private List<BromDump.Target> bromTargets() {
+        List<BromDump.Target> all = BromDump.targets(scatter == null ? null : scatter.partitions);
+        List<String> picked = new ArrayList<>();
+        for (Row r : rows) {
+            if (r.cb != null && r.cb.isChecked()) picked.add(fbName(r.p.name));
+        }
+        return BromDump.filter(all, picked);
+    }
+
+    private void startBromDump() {
+        if (brom == null) {
+            toast("Connect BROM dulu, HP harus di mode BROM");
+            return;
+        }
+        if (scatter == null) {
+            toast("pilih file scatter dulu");
+            return;
+        }
+        List<BromDump.Target> q = bromTargets();
+        if (q.isEmpty()) {
+            toast("scatter tidak punya alamat fisik partisi");
+            return;
+        }
+        if (daData == null) {
+            pickDa();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Dump " + q.size() + " partisi via BROM")
+                .setMessage("Alur: handshake BROM, upload DA, lalu baca flash per alamat fisik partisi.\n\n"
+                        + "DA: " + daName + "\n"
+                        + "Total: " + FastbootProtocol.human(BromDump.total(q)) + "\n\n"
+                        + "Pakai DA resmi dari ROM atau SP Flash Tool punyamu sendiri.\n"
+                        + "Chip dengan SLA/DAA akan menolak DA tanpa tanda tangan vendor, "
+                        + "aplikasi berhenti dan tidak menembus kunci.\n"
+                        + "Hanya membaca, tidak ada data di HP yang diubah.")
+                .setNegativeButton("Batal", null)
+                .setNeutralButton("Ganti DA", (d, w) -> pickDa())
+                .setPositiveButton("Lanjut", (d, w) -> pickBromOut())
+                .show();
+    }
+
+    private void pickDa() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivityForResult(i, REQ_DA);
+        } catch (Exception e) {
+            log("pemilih berkas tidak tersedia: " + e.getMessage());
+        }
+    }
+
+    private void pickBromOut() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(i, REQ_BROM_OUT);
+        } catch (Exception e) {
+            log("pemilih folder tidak tersedia: " + e.getMessage());
+        }
+    }
+
+    private void loadDa(Uri u) {
+        runBg("baca DA", () -> {
+            byte[] all;
+            try (InputStream in = getContentResolver().openInputStream(u)) {
+                if (in == null) throw new IOException("tidak bisa membuka berkas DA");
+                ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                all = bo.toByteArray();
+            }
+            if (all.length < 1024) throw new IOException("berkas DA terlalu kecil");
+            daData = all;
+            daName = String.valueOf(u.getLastPathSegment());
+            log("DA dimuat: " + daName + " (" + FastbootProtocol.human(all.length) + ")");
+            status("DA siap, tekan Dump BROM lagi");
+            return null;
+        });
+    }
+
+    private void doBromDump(Uri tree) {
+        final List<BromDump.Target> q = bromTargets();
+        if (q.isEmpty() || daData == null) {
+            toast("target atau DA belum siap");
+            return;
+        }
+        final byte[] da = daData;
+        runBg("dump brom", () -> {
+            int ok = 0;
+            int fail = 0;
+            long done = 0;
+            log("dump BROM " + q.size() + " partisi, total " + FastbootProtocol.human(BromDump.total(q)));
+            log("DA: " + daName);
+
+            brom.handshake(4);
+            log(String.format(Locale.US, "BROM tersambung, chip 0x%04X", brom.getHwCode()));
+
+            File tmp = new File(getCacheDir(), "da.bin");
+            try (FileOutputStream fo = new FileOutputStream(tmp)) {
+                fo.write(da);
+            }
+            List<DaLoader.DaImage> imgs = DaLoader.load(tmp);
+            log("DA berisi " + imgs.size() + " bagian");
+            for (DaLoader.DaImage img : imgs) {
+                status("upload DA " + img.name);
+                brom.sendDa(img.loadAddr, img.data, 0, (pct, msg) -> status("DA " + pct + "%"));
+            }
+            brom.jumpDa(imgs.get(0).loadAddr);
+            DaProtocol da2 = new DaProtocol(transport, this);
+            da2.sync();
+            log("DA jalan");
+
+            for (BromDump.Target t : q) {
+                status("baca " + t.name);
+                Uri doc = null;
+                try {
+                    doc = DocumentsContract.createDocument(getContentResolver(), tree,
+                            "application/octet-stream", BromDump.fileName(t.name));
+                    if (doc == null) throw new IOException("tidak bisa membuat berkas");
+                    long n;
+                    try (OutputStream o = getContentResolver().openOutputStream(doc)) {
+                        if (o == null) throw new IOException("tidak bisa menulis berkas");
+                        n = da2.readBack(t.addr, t.size, o,
+                                (pct, msg) -> status(t.name + " " + pct + "%"));
+                    }
+                    done += n;
+                    ok++;
+                    log("  OK    " + t.label() + " -> " + BromDump.fileName(t.name));
+                } catch (Exception e) {
+                    fail++;
+                    log("  GAGAL " + t.name + ": " + e.getMessage());
+                    if (doc != null) {
+                        try {
+                            DocumentsContract.deleteDocument(getContentResolver(), doc);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }
+            try {
+                da2.finish();
+            } catch (Exception ignored) {
+            }
+            log("dump BROM selesai: " + ok + " berhasil, " + fail + " gagal, "
+                    + FastbootProtocol.human(done));
+            status("dump BROM selesai");
+            return null;
+        });
     }
 
     private void runBg(String name, Job job) {
