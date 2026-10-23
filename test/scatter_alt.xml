@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<scatter platform="MT6789" project="k6789v1_64" storage="UFS" block_size="0x20000">
+  <partition name="boot" file_name="boot.img" partition_size="0x2000000" region="UFS_LU2" is_download="true"/>
+  <partition name="dtbo" file_name="dtbo.img" partition_size="0x800000" region="UFS_LU2" is_download="true"/>
+  <partition name="super" file_name="super.img" partition_size="0x100000000" region="UFS_LU2" is_download="true"/>
+  <partition name="nvram" file_name="nvram.bin" partition_size="0x400000" region="UFS_LU2" is_download="true"/>
+</scatter>

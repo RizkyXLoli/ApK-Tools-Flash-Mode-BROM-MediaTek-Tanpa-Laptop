@@ -43,6 +43,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private static final String ACTION_USB_PERM = "com.rizky.mtkflash.USB_PERMISSION";
     private static final int REQ_TREE = 1001;
+    private static final int REQ_SCATTER = 1002;
 
     private static final Set<String> BROM_ONLY = new HashSet<>(Arrays.asList(
             "preloader", "pgpt", "sgpt", "boot_para", "nvram", "nvdata", "nvcfg",
@@ -74,6 +75,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private Button flashBtn;
 
     private Uri treeUri;
+    private Uri scatterUri;
     private ScatterParser.Scatter scatter;
     private final List<Row> rows = new ArrayList<>();
 
@@ -131,11 +133,12 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         }
 
         log("MTK Flash siap. Alurnya sama seperti versi PC:");
-        log("1) pilih folder ROM hasil download");
-        log("2) aplikasi baca file scatter di folder itu");
-        log("3) centang partisi yang mau ditulis");
-        log("4) colok HP dalam mode fastboot, tekan FB scan");
-        log("5) tekan Flash terpilih");
+        log("1) ekstrak dulu file ROM hasil download (zip/rar)");
+        log("2) tekan Pilih file scatter, cari scatter .txt atau .xml");
+        log("3) aplikasi baca scatter dan menampilkan daftar partisi");
+        log("4) centang partisi yang mau ditulis");
+        log("5) colok HP dalam mode fastboot, tekan FB scan");
+        log("6) tekan Flash terpilih");
         refreshDeviceList();
     }
 
@@ -170,13 +173,14 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         root.addView(statusView);
 
         root.addView(row(
+                btn("Pilih file scatter", this::doPickScatter),
                 btn("Pilih folder ROM", this::doPickFolder),
                 btn("Muat ulang", this::reloadRom),
                 btn("Centang siap", this::checkReady),
                 btn("Kosongkan", this::clearChecks)));
 
         romView = new TextView(this);
-        romView.setText("belum ada ROM dipilih");
+        romView.setText("belum ada file scatter dipilih");
         romView.setTextColor(Color.parseColor("#9aa4b2"));
         romView.setTextSize(11);
         romView.setPadding(0, dp(6), 0, dp(4));
@@ -256,6 +260,26 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         log("ERROR: " + s);
     }
 
+    private void doPickScatter() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "text/plain",
+                "text/xml",
+                "application/xml",
+                "application/octet-stream"
+        });
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(i, REQ_SCATTER);
+        } catch (Exception e) {
+            log("pemilih berkas tidak tersedia: " + e.getMessage());
+            doPickFolder();
+        }
+    }
+
     private void doPickFolder() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -270,7 +294,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (req != REQ_TREE || res != RESULT_OK || data == null || data.getData() == null) {
+        if (res != RESULT_OK || data == null || data.getData() == null) {
+            if (req == REQ_SCATTER || req == REQ_TREE) log("pemilihan dibatalkan");
             return;
         }
         Uri u = data.getData();
@@ -279,16 +304,47 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                     Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (Exception ignored) {
         }
-        treeUri = u;
-        loadRom();
+        if (req == REQ_SCATTER) {
+            scatterUri = u;
+            treeUri = null;
+            loadScatterFile();
+        } else if (req == REQ_TREE) {
+            treeUri = u;
+            scatterUri = null;
+            loadRom();
+        }
     }
 
     private void reloadRom() {
-        if (treeUri == null) {
-            toast("pilih folder ROM dulu");
-            return;
+        if (scatterUri != null) {
+            loadScatterFile();
+        } else if (treeUri != null) {
+            loadRom();
+        } else {
+            toast("pilih file scatter dulu");
         }
-        loadRom();
+    }
+
+    private void loadScatterFile() {
+        final Uri u = scatterUri;
+        runBg("baca scatter", () -> {
+            String name = RomFolder.displayName(this, u);
+            ScatterParser.Scatter parsed;
+            try (InputStream in = RomFolder.open(this, u)) {
+                parsed = ScatterParser.parse(in);
+            }
+
+            List<RomFolder.Entry> entries = new ArrayList<>();
+            boolean folderOk = true;
+            try {
+                entries = RomFolder.siblings(this, u);
+            } catch (Exception e) {
+                folderOk = false;
+                log("folder induk tidak bisa dibaca: " + e.getMessage());
+            }
+            apply(name, parsed, entries, folderOk);
+            return null;
+        });
     }
 
     private void loadRom() {
@@ -302,81 +358,97 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                         txt.add(e.name);
                     }
                 }
-                throw new IllegalStateException("file scatter tidak ditemukan di folder ini"
-                        + (txt.isEmpty() ? "" : " (ada .txt: " + String.join(", ", txt) + ")"));
+                List<String> cand = new ArrayList<>();
+                for (RomFolder.Entry e : entries) {
+                    if (!e.dir) {
+                        String n = e.name.toLowerCase(Locale.US);
+                        if (n.endsWith(".txt") || n.endsWith(".xml")) cand.add(e.name);
+                    }
+                }
+                throw new IllegalStateException("file scatter (.txt/.xml) tidak ada di folder ini"
+                        + (cand.isEmpty() ? "" : " (ada: " + String.join(", ", cand) + ")"));
             }
 
             ScatterParser.Scatter parsed;
             try (InputStream in = RomFolder.open(this, sc.uri)) {
                 parsed = ScatterParser.parse(in);
             }
-
-            Map<String, RomFolder.Entry> byName = new HashMap<>();
-            for (RomFolder.Entry e : entries) {
-                if (!e.dir) byName.put(e.name.toLowerCase(Locale.US), e);
-            }
-
-            List<Row> built = new ArrayList<>();
-            for (ScatterParser.Partition p : parsed.partitions) {
-                Row r = new Row();
-                r.p = p;
-                String key = p.fileName == null ? "" : p.fileName.toLowerCase(Locale.US).trim();
-                if (key.isEmpty()) {
-                    r.note = "tanpa image";
-                    r.blocked = true;
-                } else {
-                    r.file = byName.get(key);
-                    if (r.file == null) {
-                        r.note = "tidak ada di folder";
-                    } else if (BROM_ONLY.contains(p.name.toLowerCase(Locale.US))) {
-                        r.blocked = true;
-                        r.note = "khusus BROM/DA";
-                    }
-                }
-                built.add(r);
-            }
-
-            int ready = 0;
-            for (Row r : built) if (r.file != null && !r.blocked) ready++;
-            final int readyCount = ready;
-
-            ui.post(() -> {
-                scatter = parsed;
-                rows.clear();
-                rows.addAll(built);
-                buildTable();
-                romView.setText(String.format(Locale.US,
-                        "%s · %s · %d partisi · %d siap diflash",
-                        sc.name,
-                        parsed.platform.isEmpty() ? "platform ?" : parsed.platform,
-                        parsed.partitions.size(), readyCount));
-                log("scatter   : " + sc.name);
-                log("platform  : " + (parsed.platform.isEmpty() ? "?" : parsed.platform)
-                        + "   storage: " + (parsed.storage.isEmpty() ? "?" : parsed.storage));
-                log(String.format(Locale.US,
-                        "partisi   : %d terbaca, %d punya image di folder",
-                        parsed.partitions.size(), readyCount));
-                if (readyCount == 0) {
-                    log("tidak ada image yang cocok. Pastikan ROM sudah diekstrak,");
-                    log("bukan masih di dalam zip/rar, dan image ada di folder yang sama");
-                    log("dengan file scatter.");
-                }
-                status("ROM siap: " + readyCount + " partisi");
-            });
+            apply(sc.name, parsed, entries, true);
             return null;
+        });
+    }
+
+    private void apply(String name, ScatterParser.Scatter parsed,
+                       List<RomFolder.Entry> entries, boolean folderOk) {
+        Map<String, RomFolder.Entry> byName = new HashMap<>();
+        for (RomFolder.Entry e : entries) {
+            if (!e.dir) byName.put(e.name.toLowerCase(Locale.US), e);
+        }
+
+        List<Row> built = new ArrayList<>();
+        for (ScatterParser.Partition p : parsed.partitions) {
+            Row r = new Row();
+            r.p = p;
+            String key = p.fileName == null ? "" : p.fileName.toLowerCase(Locale.US).trim();
+            if (key.isEmpty()) {
+                r.note = "tanpa image";
+                r.blocked = true;
+            } else {
+                r.file = byName.get(key);
+                if (r.file == null) {
+                    r.note = folderOk ? "tidak ada di folder" : "image tidak ketemu";
+                } else if (BROM_ONLY.contains(p.name.toLowerCase(Locale.US))) {
+                    r.blocked = true;
+                    r.note = "khusus BROM/DA";
+                }
+            }
+            built.add(r);
+        }
+
+        int ready = 0;
+        for (Row r : built) if (r.file != null && !r.blocked) ready++;
+        final int readyCount = ready;
+
+        ui.post(() -> {
+            scatter = parsed;
+            rows.clear();
+            rows.addAll(built);
+            buildTable();
+            romView.setText(String.format(Locale.US,
+                    "%s · %s · %s · %d partisi · %d siap diflash",
+                    name,
+                    parsed.xml ? "scatter xml" : "scatter txt",
+                    parsed.platform.isEmpty() ? "platform ?" : parsed.platform,
+                    parsed.partitions.size(), readyCount));
+            log("scatter   : " + name + (parsed.xml ? "  (xml)" : "  (txt)"));
+            log("platform  : " + (parsed.platform.isEmpty() ? "?" : parsed.platform)
+                    + "   storage: " + (parsed.storage.isEmpty() ? "?" : parsed.storage));
+            log(String.format(Locale.US,
+                    "partisi   : %d terbaca, %d punya image di folder",
+                    parsed.partitions.size(), readyCount));
+            if (readyCount == 0) {
+                log("tidak ada image yang cocok. Pastikan ROM sudah diekstrak,");
+                log("bukan masih di dalam zip/rar, dan image ada di folder yang sama");
+                log("dengan file scatter.");
+                if (!folderOk) log("folder induk tidak terbaca: pakai tombol Pilih folder ROM");
+            }
+            status("scatter siap: " + readyCount + " partisi");
         });
     }
 
     private RomFolder.Entry pickScatter(List<RomFolder.Entry> entries) {
         RomFolder.Entry best = null;
+        RomFolder.Entry xml = null;
         for (RomFolder.Entry e : entries) {
             if (e.dir) continue;
             String n = e.name.toLowerCase(Locale.US);
-            if (!n.endsWith(".txt") || !n.contains("scatter")) continue;
+            if (!(n.endsWith(".txt") || n.endsWith(".xml"))) continue;
+            if (!n.contains("scatter")) continue;
             if (n.equals("android_scatter.txt")) return e;
+            if (n.endsWith(".xml") && xml == null) xml = e;
             if (best == null) best = e;
         }
-        return best;
+        return best != null ? best : xml;
     }
 
     private void buildTable() {
