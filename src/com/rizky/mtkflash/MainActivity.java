@@ -73,6 +73,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private TextView romView;
     private LinearLayout tableBox;
     private Button flashBtn;
+    private Button modeBtn;
+    private FlashMode mode = FlashMode.DOWNLOAD_ONLY;
 
     private Uri treeUri;
     private Uri scatterUri;
@@ -196,9 +198,11 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         root.addView(tableScroll);
 
         flashBtn = btn("Flash terpilih", this::confirmFlash);
+        modeBtn = btn("Mode: " + mode.label, this::pickMode);
         root.addView(row(
                 btn("FB scan", this::doFastbootScan),
                 btn("FB info", this::doFastbootInfo),
+                modeBtn,
                 flashBtn,
                 btn("Putus", this::doDisconnect)));
 
@@ -492,10 +496,33 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         updateFlashBtn();
     }
 
+    private void pickMode() {
+        int cur = mode.ordinal();
+        new AlertDialog.Builder(this)
+                .setTitle("Mode flash")
+                .setSingleChoiceItems(FlashMode.labels(), cur, (d, which) -> {
+                    mode = FlashMode.byIndex(which);
+                    modeBtn.setText("Mode: " + mode.label);
+                    log("mode flash: " + mode.label + " — " + mode.note);
+                    updateFlashBtn();
+                    d.dismiss();
+                })
+                .setNegativeButton("Batal", null)
+                .show();
+    }
+
     private void updateFlashBtn() {
         int n = 0;
         for (Row r : rows) if (r.cb != null && r.cb.isChecked()) n++;
-        flashBtn.setText(n == 0 ? "Flash terpilih" : "Flash " + n + " partisi");
+        if (mode.flashAll()) {
+            int all = 0;
+            for (Row r : rows) {
+                if (r.file != null && !r.blocked && !mode.keepData(r.p.name)) all++;
+            }
+            flashBtn.setText("Flash " + all + " partisi (" + mode.label + ")");
+        } else {
+            flashBtn.setText(n == 0 ? "Flash terpilih" : "Flash " + n + " partisi");
+        }
     }
 
     private void checkReady() {
@@ -517,30 +544,63 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         }
         List<Row> pick = new ArrayList<>();
         for (Row r : rows) {
-            if (r.cb != null && r.cb.isChecked() && r.file != null && !r.blocked) pick.add(r);
+            if (r.file == null || r.blocked) continue;
+            if (mode.flashAll()) {
+                if (!mode.keepData(r.p.name)) pick.add(r);
+            } else if (r.cb != null && r.cb.isChecked()) {
+                pick.add(r);
+            }
         }
         if (pick.isEmpty()) {
-            toast("belum ada partisi dicentang");
+            toast(mode.flashAll() ? "tidak ada image di scatter ini" : "belum ada partisi dicentang");
             return;
         }
 
         StringBuilder sb = new StringBuilder();
+        int shown = 0;
         for (Row r : pick) {
-            sb.append("\n  ").append(fbName(r.p.name)).append("  <-  ").append(r.p.fileName);
+            if (shown++ < 40) {
+                sb.append("\n  ").append(fbName(r.p.name)).append("  <-  ").append(r.p.fileName);
+            }
+        }
+        if (pick.size() > 40) sb.append("\n  ... dan ").append(pick.size() - 40).append(" lainnya");
+
+        String extra = "";
+        if (mode.wipeFirst()) {
+            extra = "\n\nMODE Format All + Download: data user (userdata, metadata, cache) dihapus dulu."
+                    + "\nSemua aplikasi, foto, dan akun di HP akan hilang.";
+        } else if (mode == FlashMode.FIRMWARE_UPGRADE) {
+            extra = "\n\nMODE Firmware Upgrade: semua partisi ROM ditulis, data user dipertahankan.";
+        } else {
+            extra = "\n\nMODE Download Only: hanya partisi yang dicentang.";
         }
 
         new AlertDialog.Builder(this)
-                .setTitle("Flash " + pick.size() + " partisi?")
-                .setMessage("Yang akan ditulis:" + sb
+                .setTitle(mode.label + " — " + pick.size() + " partisi?")
+                .setMessage("Yang akan ditulis:" + sb + extra
                         + "\n\nJangan cabut kabel sampai selesai. Salah partisi bisa brick.")
                 .setNegativeButton("Batal", null)
-                .setPositiveButton("Flash", (d, w) -> doFlash(pick))
+                .setPositiveButton(mode.wipeFirst() ? "Hapus & Flash" : "Flash",
+                        (d, w) -> doFlash(pick))
                 .show();
     }
 
     private void doFlash(List<Row> pick) {
         runBg("flash", () -> {
             int ok = 0, fail = 0;
+            log("mode: " + mode.label + " — " + mode.note);
+            if (mode.wipeFirst()) {
+                for (String p : new String[]{"userdata", "metadata", "cache"}) {
+                    try {
+                        status("hapus " + p);
+                        log("hapus " + p + " ...");
+                        fastboot.erase(p);
+                        log("  OK hapus " + p);
+                    } catch (Exception e) {
+                        log("  lewati hapus " + p + ": " + e.getMessage());
+                    }
+                }
+            }
             for (Row r : pick) {
                 String part = fbName(r.p.name);
                 long size = RomFolder.size(this, r.file.uri, r.file.size);
