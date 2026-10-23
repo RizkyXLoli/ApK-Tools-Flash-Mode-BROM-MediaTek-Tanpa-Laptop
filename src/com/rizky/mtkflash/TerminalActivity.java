@@ -28,6 +28,8 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -49,6 +51,7 @@ public class TerminalActivity extends Activity {
 
     private static final String ACTION_USB_PERM = "com.rizky.mtkflash.TERM_USB_PERMISSION";
     private static final int REQ_IMG = 2001;
+    private static final int REQ_ATTACH = 2002;
 
     private static final Set<String> FB_WORDS = new HashSet<>(Arrays.asList(
             "flash", "erase", "getvar", "reboot", "reboot-bootloader", "oem",
@@ -81,6 +84,10 @@ public class TerminalActivity extends Activity {
     private Runnable afterPerm;
     private String pendingPart;
     private int lastPct = -1;
+
+    private Uri pickedUri;
+    private String pickedName;
+    private long pickedSize = -1;
 
     private interface FbJob {
         void run(FastbootProtocol fb) throws Exception;
@@ -189,7 +196,20 @@ public class TerminalActivity extends Activity {
         LinearLayout sendRow = new LinearLayout(this);
         sendRow.setOrientation(LinearLayout.HORIZONTAL);
         sendRow.addView(input);
-        Button send = btn("Kirim");
+
+        ImageButton attach = new ImageButton(this);
+        attach.setImageResource(R.drawable.ic_arrow_file);
+        attach.setBackground(cellBg("#1c2230", "#2c3547"));
+        attach.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        attach.setPadding(dp(10), dp(10), dp(10), dp(10));
+        attach.setContentDescription("pilih berkas image");
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(dp(46), dp(40));
+        alp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        attach.setLayoutParams(alp);
+        attach.setOnClickListener(v -> pickAttach());
+        sendRow.addView(attach);
+
+        Button send = btnFixed("Kirim", 74);
         send.setOnClickListener(v -> {
             String s = input.getText().toString();
             input.setText("");
@@ -232,6 +252,22 @@ public class TerminalActivity extends Activity {
     }
 
     private Button btn(String text) {
+        Button b = btnBase(text);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(40), 1f);
+        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private Button btnFixed(String text, int widthDp) {
+        Button b = btnBase(text);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(widthDp), dp(40));
+        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        b.setLayoutParams(lp);
+        return b;
+    }
+
+    private Button btnBase(String text) {
         Button b = new Button(this);
         b.setText(text);
         b.setAllCaps(false);
@@ -246,9 +282,6 @@ public class TerminalActivity extends Activity {
         b.setMinHeight(0);
         b.setMinimumHeight(0);
         b.setPadding(dp(2), 0, dp(2), 0);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(40), 1f);
-        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
-        b.setLayoutParams(lp);
         return b;
     }
 
@@ -413,6 +446,7 @@ public class TerminalActivity extends Activity {
         echo("--- fastboot ---");
         echo("fastboot devices              daftar HP mode fastboot");
         echo("fastboot flash <partisi>      pilih file image lalu tulis");
+        echo("fastboot flash <partisi> <berkas>   tulis berkas yang sudah dipilih");
         echo("fastboot erase <partisi>      hapus partisi");
         echo("fastboot getvar <nama>        baca variabel bootloader");
         echo("fastboot getvar all           semua variabel");
@@ -524,11 +558,26 @@ public class TerminalActivity extends Activity {
         final String sub = a.get(0).toLowerCase(Locale.US);
         if ("flash".equals(sub)) {
             if (a.size() < 2) {
-                echo("format: fastboot flash <partisi>");
+                echo("format: fastboot flash <partisi> [berkas]");
+                echo("contoh: ketik \"fastboot flash boot\" lalu tekan ikon panah untuk pilih berkas");
                 return;
             }
-            pendingPart = a.get(1);
-            echo("pilih file image untuk partisi " + pendingPart + " ...");
+            final String part = a.get(1);
+            if (a.size() >= 3) {
+                final String arg = join(a.subList(2, a.size()));
+                if (pickedUri != null && pickedName != null && pickedName.equalsIgnoreCase(basename(arg))) {
+                    flashWithUri(part, pickedUri);
+                    return;
+                }
+                File f = new File(arg);
+                if (f.isFile() && f.canRead()) {
+                    flashWithFile(part, f);
+                    return;
+                }
+                echo("berkas tidak ditemukan: " + arg);
+            }
+            pendingPart = part;
+            echo("pilih file image untuk partisi " + part + " ...");
             pickImage();
             return;
         }
@@ -612,6 +661,60 @@ public class TerminalActivity extends Activity {
         echo("perintah adb yang didukung: devices, shell <perintah>, getprop [nama], reboot [bootloader|recovery]");
     }
 
+    private void pickAttach() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(i, REQ_ATTACH);
+        } catch (Exception e) {
+            echo("pemilih berkas tidak tersedia: " + msg(e));
+        }
+    }
+
+    private void takePerm(Uri uri) {
+        try {
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String displayName(Uri u) {
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(u, null, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0 && !c.isNull(idx)) {
+                    String s = c.getString(idx);
+                    if (s != null && s.length() > 0) return s;
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) c.close();
+        }
+        String last = u.getLastPathSegment();
+        if (last == null || last.length() == 0) return "image.img";
+        int slash = last.lastIndexOf('/');
+        return slash >= 0 ? last.substring(slash + 1) : last;
+    }
+
+    private void insertAtCursor(String text) {
+        String cur = input.getText().toString();
+        int at = input.getSelectionStart();
+        if (at < 0 || at > cur.length()) at = cur.length();
+        String pre = cur.substring(0, at);
+        String post = cur.substring(at);
+        if (pre.length() > 0 && !pre.endsWith(" ")) pre = pre + " ";
+        String joined = pre + text;
+        input.setText(joined + post);
+        input.setSelection(joined.length());
+        input.requestFocus();
+    }
+
     private void pickImage() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
@@ -628,6 +731,23 @@ public class TerminalActivity extends Activity {
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == REQ_ATTACH) {
+            if (res != RESULT_OK || data == null || data.getData() == null) {
+                echo("pemilihan berkas dibatalkan");
+                return;
+            }
+            Uri uri = data.getData();
+            takePerm(uri);
+            String nm = displayName(uri);
+            long sz = sizeOf(uri);
+            pickedUri = uri;
+            pickedName = nm;
+            pickedSize = sz;
+            insertAtCursor(nm);
+            echo("berkas dipilih: " + nm + (sz > 0 ? "  (" + FastbootProtocol.human(sz) + ")" : ""));
+            echo("tekan Kirim untuk menjalankan perintah");
+            return;
+        }
         if (req != REQ_IMG) return;
         final String part = pendingPart;
         pendingPart = null;
@@ -637,10 +757,11 @@ public class TerminalActivity extends Activity {
         }
         if (part == null) return;
         final Uri uri = data.getData();
-        try {
-            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        } catch (Exception ignored) {
-        }
+        takePerm(uri);
+        flashWithUri(part, uri);
+    }
+
+    private void flashWithUri(final String part, final Uri uri) {
         withFb(fb -> {
             long size = sizeOf(uri);
             File tmp = null;
@@ -653,7 +774,7 @@ public class TerminalActivity extends Activity {
                 in = new java.io.FileInputStream(tmp);
             }
             if (in == null) throw new IOException("tidak bisa membuka berkas image");
-            echo("flash " + part + " — " + FastbootProtocol.human(size));
+            echo("flash " + part + " — " + displayName(uri) + "  " + FastbootProtocol.human(size));
             lastPct = -1;
             try {
                 fb.flashStream(part, size, in, (pct, m) -> {
@@ -671,6 +792,30 @@ public class TerminalActivity extends Activity {
             }
             echo("selesai: " + part + " sudah ditulis");
         });
+    }
+
+    private void flashWithFile(final String part, final File f) {
+        withFb(fb -> {
+            long size = f.length();
+            echo("flash " + part + " — " + f.getName() + "  " + FastbootProtocol.human(size));
+            lastPct = -1;
+            try (InputStream in = new java.io.FileInputStream(f)) {
+                fb.flashStream(part, size, in, (pct, m) -> {
+                    if (pct >= lastPct + 5 || pct == 100) {
+                        lastPct = pct;
+                        echo(String.format(Locale.US, "  %3d%%  %s", pct, m));
+                    }
+                });
+            }
+            echo("selesai: " + part + " sudah ditulis");
+        });
+    }
+
+    private static String basename(String p) {
+        if (p == null) return "";
+        String s = p.trim();
+        int slash = s.lastIndexOf('/');
+        return slash >= 0 ? s.substring(slash + 1) : s;
     }
 
     private long sizeOf(Uri u) {
