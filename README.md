@@ -1,4 +1,8 @@
 ## Tools Flash via Brom mediatek
+
+[![Download APK](https://img.shields.io/badge/Download-mtkflash.apk-2ea44f?style=for-the-badge&logo=android&logoColor=white)](https://github.com/RizkyXLoli/ApK-Tools-Flash-Mode-BROM-MediaTek-Tanpa-Laptop/releases/latest/download/mtkflash.apk)
+
+**v1.0.0** — Android 7.0+ — 33 KB — [semua rilis](https://github.com/RizkyXLoli/ApK-Tools-Flash-Mode-BROM-MediaTek-Tanpa-Laptop/releases)
 Belum ditest secara langsung (gak ada device nya njir) 
 
 ## cara penggunaan
