@@ -10,7 +10,9 @@ import android.hardware.usb.UsbManager;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Locale;
 
 public class FastbootProtocol {
@@ -135,6 +137,74 @@ public class FastbootProtocol {
         } catch (NumberFormatException e) {
             return 0x10000000L;
         }
+    }
+
+    public long maxFetchSize() {
+        try {
+            return Readback.parseHex(getVar("max-fetch-size"));
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    public long partitionSize(String partition) {
+        try {
+            return Readback.parseHex(getVar("partition-size:" + partition));
+        } catch (IOException e) {
+            return -1;
+        }
+    }
+
+    public long fetchTo(String partition, long offset, long size, OutputStream out,
+                        BromProtocol.Progress progress) throws IOException {
+        if (size <= 0) throw new IOException("ukuran baca tidak valid untuk " + partition);
+
+        Response d = command(Readback.fetchCmd(partition, offset, size));
+        if (!"DATA".equals(d.status)) {
+            throw new IOException("bootloader menolak fetch — " + d);
+        }
+
+        byte[] buf = new byte[65536];
+        long got = 0;
+        while (got < size) {
+            int want = (int) Math.min(buf.length, size - got);
+            int n = connection.bulkTransfer(epIn, buf, want, 15000);
+            if (n <= 0) throw new IOException("data terputus di " + got + "/" + size + " byte");
+            out.write(buf, 0, n);
+            got += n;
+            if (progress != null) {
+                progress.onProgress((int) (got * 100 / size),
+                        human(got) + " / " + human(size));
+            }
+        }
+
+        Response ack = readResponse();
+        if (!ack.ok()) throw new IOException("fetch gagal — " + ack);
+        return got;
+    }
+
+    public long dumpPartition(String partition, OutputStream out,
+                              BromProtocol.Progress progress) throws IOException {
+        long total = partitionSize(partition);
+        if (total <= 0) throw new IOException("ukuran partisi " + partition + " tidak terbaca");
+        long max = maxFetchSize();
+        if (max <= 0) throw new IOException("bootloader tidak mendukung fetch");
+
+        List<long[]> plan = Readback.plan(total, max);
+        if (plan.isEmpty()) throw new IOException("rencana baca kosong untuk " + partition);
+
+        long done = 0;
+        for (long[] c : plan) {
+            final long base = done;
+            final long len = c[1];
+            fetchTo(partition, c[0], len, out, (pct, msg) -> {
+                if (progress != null) {
+                    progress.onProgress((int) ((base + len * pct / 100) * 100 / total), msg);
+                }
+            });
+            done += len;
+        }
+        return done;
     }
 
     public void flash(String partition, byte[] image, BromProtocol.Progress progress)

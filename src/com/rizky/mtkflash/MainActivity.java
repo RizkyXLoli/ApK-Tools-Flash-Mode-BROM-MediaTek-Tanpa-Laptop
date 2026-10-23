@@ -16,6 +16,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.DocumentsContract;
 import android.text.method.ScrollingMovementMethod;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,7 +28,9 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -44,6 +47,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private static final String ACTION_USB_PERM = "com.rizky.mtkflash.USB_PERMISSION";
     private static final int REQ_TREE = 1001;
     private static final int REQ_SCATTER = 1002;
+    private static final int REQ_DUMP = 1003;
 
     private static final Set<String> BROM_ONLY = new HashSet<>(Arrays.asList(
             "preloader", "pgpt", "sgpt", "boot_para", "nvram", "nvdata", "nvcfg",
@@ -78,6 +82,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private Uri treeUri;
     private Uri scatterUri;
+    private final List<String> dumpQueue = new ArrayList<>();
     private ScatterParser.Scatter scatter;
     private final List<Row> rows = new ArrayList<>();
 
@@ -222,7 +227,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
         root.addView(row(
                 btn("Connect BROM", this::doConnectBrom),
-                btn("Info chip", this::doChipInfo)));
+                btn("Info chip", this::doChipInfo),
+                btn("Dump partisi", this::startDump)));
 
         return root;
     }
@@ -316,6 +322,13 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             treeUri = u;
             scatterUri = null;
             loadRom();
+        } else if (req == REQ_DUMP) {
+            try {
+                getContentResolver().takePersistableUriPermission(u,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+            doDump(u);
         }
     }
 
@@ -633,6 +646,91 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         String n = scatterName == null ? "" : scatterName.toLowerCase(Locale.US).trim();
         String alias = FB_ALIAS.get(n);
         return alias == null ? n : alias;
+    }
+
+    private void startDump() {
+        if (fastboot == null) {
+            toast("FB scan dulu, HP harus di mode fastboot");
+            return;
+        }
+        final List<String> q = new ArrayList<>();
+        for (Row r : rows) {
+            if (r.cb != null && r.cb.isChecked()) q.add(fbName(r.p.name));
+        }
+        if (q.isEmpty()) {
+            for (Row r : rows) {
+                if (r.file != null && !r.blocked) q.add(fbName(r.p.name));
+            }
+        }
+        if (q.isEmpty()) {
+            toast("belum ada partisi, pilih file scatter dulu");
+            return;
+        }
+        dumpQueue.clear();
+        dumpQueue.addAll(q);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Dump " + q.size() + " partisi")
+                .setMessage("Hasil dibaca dari HP lewat perintah fetch fastboot, lalu disimpan ke folder yang kamu pilih.\n\n"
+                        + "Syarat: bootloader mendukung fetch (getvar max-fetch-size). Kalau tidak didukung, "
+                        + "partisi itu akan dilewati dan dicatat di log. Tidak ada data yang diubah di HP.")
+                .setNegativeButton("Batal", null)
+                .setPositiveButton("Pilih folder", (d, w) -> {
+                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    try {
+                        startActivityForResult(i, REQ_DUMP);
+                    } catch (Exception e) {
+                        log("pemilih folder tidak tersedia: " + e.getMessage());
+                    }
+                })
+                .show();
+    }
+
+    private void doDump(Uri tree) {
+        final List<String> q = new ArrayList<>(dumpQueue);
+        runBg("dump", () -> {
+            int ok = 0;
+            int fail = 0;
+            long bytes = 0;
+            log("dump " + q.size() + " partisi");
+            log("dukungan fetch: max-fetch-size = " + fastboot.maxFetchSize());
+
+            for (String part : q) {
+                status("dump " + part);
+                Uri doc = null;
+                try {
+                    doc = DocumentsContract.createDocument(getContentResolver(), tree,
+                            "application/octet-stream", Readback.fileName(part));
+                    if (doc == null) throw new IOException("tidak bisa membuat berkas " + Readback.fileName(part));
+                    OutputStream out = getContentResolver().openOutputStream(doc);
+                    if (out == null) throw new IOException("tidak bisa menulis berkas");
+                    try (OutputStream o = out) {
+                        long n = fastboot.dumpPartition(part, o,
+                                (pct, msg) -> status(part + " " + pct + "% " + msg));
+                        bytes += n;
+                        log(String.format(Locale.US, "  OK    %-16s %10s", part, FastbootProtocol.human(n)));
+                    }
+                    ok++;
+                } catch (Exception e) {
+                    fail++;
+                    log("  GAGAL " + part + ": " + e.getMessage());
+                    if (doc != null) {
+                        try {
+                            DocumentsContract.deleteDocument(getContentResolver(), doc);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+            }
+
+            log("dump selesai: " + ok + " berhasil, " + fail + " gagal, "
+                    + FastbootProtocol.human(bytes) + " ditulis");
+            status("dump selesai");
+            return null;
+        });
     }
 
     private void doFastbootScan() {
