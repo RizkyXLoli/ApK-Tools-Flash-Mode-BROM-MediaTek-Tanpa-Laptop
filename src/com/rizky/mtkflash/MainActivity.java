@@ -1,6 +1,7 @@
 package com.rizky.mtkflash;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -16,34 +17,46 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.method.ScrollingMovementMethod;
-import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.EditText;
+import android.widget.CheckBox;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
 import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 public class MainActivity extends Activity implements BromProtocol.Log {
 
     private static final String ACTION_USB_PERM = "com.rizky.mtkflash.USB_PERMISSION";
-    private static final int REQ_SCATTER = 1001;
-    private static final int REQ_DA = 1002;
-    private static final int REQ_FB_IMG = 1003;
+    private static final int REQ_TREE = 1001;
+
+    private static final Set<String> BROM_ONLY = new HashSet<>(Arrays.asList(
+            "preloader", "pgpt", "sgpt", "boot_para", "nvram", "nvdata", "nvcfg",
+            "protect1", "protect2", "seccfg", "persist", "proinfo", "expdb",
+            "flashinfo", "otp"));
+
+    private static final Map<String, String> FB_ALIAS = new HashMap<>();
+
+    static {
+        FB_ALIAS.put("android", "system");
+        FB_ALIAS.put("usrdata", "userdata");
+        FB_ALIAS.put("userdata2", "userdata");
+        FB_ALIAS.put("system_a", "system");
+    }
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final List<String> logLines = new ArrayList<>();
@@ -51,17 +64,30 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private UsbManager usbManager;
     private UsbTransport transport;
     private BromProtocol brom;
-    private DaProtocol da;
     private FastbootProtocol fastboot;
+    private boolean wantFastboot = false;
 
     private TextView statusView;
     private TextView logView;
+    private TextView romView;
+    private LinearLayout tableBox;
+    private Button flashBtn;
 
+    private Uri treeUri;
     private ScatterParser.Scatter scatter;
-    private File daFile;
-    private int daLoadAddr = DaLoader.DEFAULT_LOAD_ADDR;
-    private EditText partInput;
-    private File fbImage;
+    private final List<Row> rows = new ArrayList<>();
+
+    private static class Row {
+        ScatterParser.Partition p;
+        RomFolder.Entry file;
+        CheckBox cb;
+        String note = "";
+        boolean blocked = false;
+    }
+
+    private interface Job {
+        Object run() throws Exception;
+    }
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
         @Override
@@ -71,7 +97,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 boolean ok = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                 if (ok && d != null) {
-                    openDevice(d);
+                    if (wantFastboot) openFastboot(d);
+                    else openBrom(d);
                 } else {
                     log("izin USB ditolak untuk " + (d == null ? "?" : d.getDeviceName()));
                 }
@@ -91,7 +118,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-
         setContentView(buildUi());
 
         IntentFilter f = new IntentFilter();
@@ -104,9 +130,12 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             registerReceiver(usbReceiver, f);
         }
 
-        log("MTK Flash siap.");
-        log("Sambungkan HP lewat OTG dalam mode BROM (tekan volume+ lalu colok kabel,");
-        log("atau lepas baterai lalu colok) supaya terdeteksi sebagai 0x0E8D.");
+        log("MTK Flash siap. Alurnya sama seperti versi PC:");
+        log("1) pilih folder ROM hasil download");
+        log("2) aplikasi baca file scatter di folder itu");
+        log("3) centang partisi yang mau ditulis");
+        log("4) colok HP dalam mode fastboot, tekan FB scan");
+        log("5) tekan Flash terpilih");
         refreshDeviceList();
     }
 
@@ -124,10 +153,10 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.parseColor("#12141a"));
-        root.setPadding(dp(12), dp(12), dp(12), dp(12));
+        root.setPadding(dp(12), dp(12), dp(12), dp(8));
 
         TextView title = new TextView(this);
-        title.setText("MTK Flash — MediaTek BROM/DA flasher");
+        title.setText("MTK Flash");
         title.setTextColor(Color.parseColor("#7fd1ff"));
         title.setTextSize(17);
         title.setTypeface(Typeface.DEFAULT_BOLD);
@@ -140,77 +169,77 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         statusView.setPadding(0, dp(4), 0, dp(8));
         root.addView(statusView);
 
-        HorizontalScrollView hs = new HorizontalScrollView(this);
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(row(
+                btn("Pilih folder ROM", this::doPickFolder),
+                btn("Muat ulang", this::reloadRom),
+                btn("Centang siap", this::checkReady),
+                btn("Kosongkan", this::clearChecks)));
 
-        row.addView(button("Scan", v -> refreshDeviceList()));
-        row.addView(button("Connect", v -> doConnect()));
-        row.addView(button("Info chip", v -> doChipInfo()));
-        row.addView(button("Pilih DA", v -> pickFile(REQ_DA, "application/octet-stream")));
-        row.addView(button("Unggah DA", v -> doUploadDa()));
-        row.addView(button("Pilih scatter", v -> pickFile(REQ_SCATTER, "*/*")));
-        row.addView(button("Flash", v -> doFlash()));
-        row.addView(button("Baca partisi", v -> doReadPartition()));
-        row.addView(button("FB scan", v -> doFastbootScan()));
-        row.addView(button("FB info", v -> doFastbootInfo()));
-        row.addView(button("FB flash", v -> doFastbootFlash()));
-        row.addView(button("Putus", v -> closeTransport()));
+        romView = new TextView(this);
+        romView.setText("belum ada ROM dipilih");
+        romView.setTextColor(Color.parseColor("#9aa4b2"));
+        romView.setTextSize(11);
+        romView.setPadding(0, dp(6), 0, dp(4));
+        root.addView(romView);
 
-        hs.addView(row);
-        root.addView(hs);
+        tableBox = new LinearLayout(this);
+        tableBox.setOrientation(LinearLayout.VERTICAL);
+        ScrollView tableScroll = new ScrollView(this);
+        tableScroll.addView(tableBox);
+        tableScroll.setBackgroundColor(Color.parseColor("#171b22"));
+        tableScroll.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 3f));
+        root.addView(tableScroll);
 
-        LinearLayout fbRow = new LinearLayout(this);
-        fbRow.setOrientation(LinearLayout.HORIZONTAL);
-        fbRow.setPadding(0, dp(6), 0, 0);
+        flashBtn = btn("Flash terpilih", this::confirmFlash);
+        root.addView(row(
+                btn("FB scan", this::doFastbootScan),
+                btn("FB info", this::doFastbootInfo),
+                flashBtn,
+                btn("Putus", this::doDisconnect)));
 
-        TextView lbl = new TextView(this);
-        lbl.setText("partisi fastboot:");
-        lbl.setTextColor(Color.parseColor("#9aa4b2"));
-        lbl.setTextSize(12);
-        lbl.setPadding(0, dp(6), dp(8), 0);
-        fbRow.addView(lbl);
-
-        partInput = new EditText(this);
-        partInput.setHint("vendor_dlkm");
-        partInput.setText("vendor_dlkm");
-        partInput.setTextColor(Color.parseColor("#c8d3e0"));
-        partInput.setHintTextColor(Color.parseColor("#5a6472"));
-        partInput.setTextSize(13);
-        partInput.setSingleLine(true);
-        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
-                dp(200), ViewGroup.LayoutParams.WRAP_CONTENT);
-        partInput.setLayoutParams(ilp);
-        fbRow.addView(partInput);
-
-        root.addView(fbRow);
-
-        ScrollView sv = new ScrollView(this);
-        sv.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         logView = new TextView(this);
         logView.setTextColor(Color.parseColor("#c8d3e0"));
         logView.setTextSize(11);
         logView.setTypeface(Typeface.MONOSPACE);
         logView.setMovementMethod(new ScrollingMovementMethod());
         logView.setTextIsSelectable(true);
-        sv.addView(logView);
-        root.addView(sv);
+        ScrollView logScroll = new ScrollView(this);
+        logScroll.addView(logView);
+        logScroll.setBackgroundColor(Color.parseColor("#0d0f14"));
+        logScroll.setPadding(dp(6), dp(6), dp(6), dp(6));
+        logScroll.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 2f));
+        root.addView(logScroll);
+
+        root.addView(row(
+                btn("Connect BROM", this::doConnectBrom),
+                btn("Info chip", this::doChipInfo)));
 
         return root;
     }
 
-    private Button button(String text, View.OnClickListener l) {
+    private Button btn(String text, Runnable action) {
         Button b = new Button(this);
         b.setText(text);
         b.setAllCaps(false);
-        b.setTextSize(12);
-        b.setOnClickListener(l);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, 0, dp(6), 0);
-        b.setLayoutParams(lp);
+        b.setTextSize(11);
+        b.setOnClickListener(v -> action.run());
         return b;
+    }
+
+    private View row(Button... buttons) {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.HORIZONTAL);
+        l.setPadding(0, dp(4), 0, dp(4));
+        for (Button b : buttons) {
+            b.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            l.addView(b);
+        }
+        HorizontalScrollView h = new HorizontalScrollView(this);
+        h.addView(l);
+        return h;
     }
 
     private int dp(int v) {
@@ -227,255 +256,303 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         log("ERROR: " + s);
     }
 
-    private void log(String s) {
-        String t = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
-        ui.post(() -> {
-            logLines.add(t + "  " + s);
-            if (logLines.size() > 600) logLines.remove(0);
-            StringBuilder sb = new StringBuilder();
-            for (String l : logLines) sb.append(l).append('\n');
-            logView.setText(sb.toString());
-        });
+    private void doPickFolder() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(i, REQ_TREE);
+        } catch (Exception e) {
+            log("pemilih folder tidak tersedia: " + e.getMessage());
+        }
     }
 
-    private void status(String s) {
-        ui.post(() -> statusView.setText(s));
-    }
-
-    private void toast(String s) {
-        ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
-    }
-
-    private void refreshDeviceList() {
-        Map<String, UsbDevice> devs = usbManager.getDeviceList();
-        if (devs.isEmpty()) {
-            status("tidak ada perangkat USB");
-            log("daftar USB kosong");
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req != REQ_TREE || res != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
-        log("perangkat USB terdeteksi:");
-        for (UsbDevice d : devs.values()) {
-            log(String.format(Locale.US, "  %s  VID=%04X PID=%04X  %s",
-                    d.getDeviceName(), d.getVendorId(), d.getProductId(),
-                    d.getProductName() == null ? "" : d.getProductName()));
-            if (d.getVendorId() == UsbTransport.MTK_VID) {
-                status(String.format("MediaTek terdeteksi: PID %04X", d.getProductId()));
+        Uri u = data.getData();
+        try {
+            getContentResolver().takePersistableUriPermission(u,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception ignored) {
+        }
+        treeUri = u;
+        loadRom();
+    }
+
+    private void reloadRom() {
+        if (treeUri == null) {
+            toast("pilih folder ROM dulu");
+            return;
+        }
+        loadRom();
+    }
+
+    private void loadRom() {
+        runBg("baca ROM", () -> {
+            List<RomFolder.Entry> entries = RomFolder.list(this, treeUri);
+            RomFolder.Entry sc = pickScatter(entries);
+            if (sc == null) {
+                List<String> txt = new ArrayList<>();
+                for (RomFolder.Entry e : entries) {
+                    if (!e.dir && e.name.toLowerCase(Locale.US).endsWith(".txt")) {
+                        txt.add(e.name);
+                    }
+                }
+                throw new IllegalStateException("file scatter tidak ditemukan di folder ini"
+                        + (txt.isEmpty() ? "" : " (ada .txt: " + String.join(", ", txt) + ")"));
             }
-        }
-    }
 
-    private UsbDevice findMtk() {
-        for (UsbDevice d : usbManager.getDeviceList().values()) {
-            if (d.getVendorId() == UsbTransport.MTK_VID) return d;
-        }
-        return null;
-    }
+            ScatterParser.Scatter parsed;
+            try (InputStream in = RomFolder.open(this, sc.uri)) {
+                parsed = ScatterParser.parse(in);
+            }
 
-    private void doConnect() {
-        UsbDevice d = findMtk();
-        if (d == null) {
-            toast("perangkat MediaTek (0E8D) tidak ditemukan");
-            log("tidak ada perangkat dengan VID 0E8D");
-            return;
-        }
-        if (!usbManager.hasPermission(d)) {
-            log("minta izin USB...");
-            int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0;
-            usbManager.requestPermission(d, PendingIntent.getBroadcast(this, 0,
-                    new Intent(ACTION_USB_PERM).setPackage(getPackageName()), flags));
-            return;
-        }
-        openDevice(d);
-    }
+            Map<String, RomFolder.Entry> byName = new HashMap<>();
+            for (RomFolder.Entry e : entries) {
+                if (!e.dir) byName.put(e.name.toLowerCase(Locale.US), e);
+            }
 
-    private void openDevice(UsbDevice d) {
-        closeTransport();
-        runBg("connect", () -> {
-            transport = new UsbTransport(usbManager, d);
-            brom = new BromProtocol(transport, this);
-            brom.handshake(50);
-            status("terhubung: " + d.getDeviceName());
+            List<Row> built = new ArrayList<>();
+            for (ScatterParser.Partition p : parsed.partitions) {
+                Row r = new Row();
+                r.p = p;
+                String key = p.fileName == null ? "" : p.fileName.toLowerCase(Locale.US).trim();
+                if (key.isEmpty()) {
+                    r.note = "tanpa image";
+                    r.blocked = true;
+                } else {
+                    r.file = byName.get(key);
+                    if (r.file == null) {
+                        r.note = "tidak ada di folder";
+                    } else if (BROM_ONLY.contains(p.name.toLowerCase(Locale.US))) {
+                        r.blocked = true;
+                        r.note = "khusus BROM/DA";
+                    }
+                }
+                built.add(r);
+            }
+
+            int ready = 0;
+            for (Row r : built) if (r.file != null && !r.blocked) ready++;
+            final int readyCount = ready;
+
+            ui.post(() -> {
+                scatter = parsed;
+                rows.clear();
+                rows.addAll(built);
+                buildTable();
+                romView.setText(String.format(Locale.US,
+                        "%s · %s · %d partisi · %d siap diflash",
+                        sc.name,
+                        parsed.platform.isEmpty() ? "platform ?" : parsed.platform,
+                        parsed.partitions.size(), readyCount));
+                log("scatter   : " + sc.name);
+                log("platform  : " + (parsed.platform.isEmpty() ? "?" : parsed.platform)
+                        + "   storage: " + (parsed.storage.isEmpty() ? "?" : parsed.storage));
+                log(String.format(Locale.US,
+                        "partisi   : %d terbaca, %d punya image di folder",
+                        parsed.partitions.size(), readyCount));
+                if (readyCount == 0) {
+                    log("tidak ada image yang cocok. Pastikan ROM sudah diekstrak,");
+                    log("bukan masih di dalam zip/rar, dan image ada di folder yang sama");
+                    log("dengan file scatter.");
+                }
+                status("ROM siap: " + readyCount + " partisi");
+            });
             return null;
         });
     }
 
-    private void closeTransport() {
-        if (fastboot != null) {
-            fastboot.close();
-            fastboot = null;
-            log("fastboot ditutup");
+    private RomFolder.Entry pickScatter(List<RomFolder.Entry> entries) {
+        RomFolder.Entry best = null;
+        for (RomFolder.Entry e : entries) {
+            if (e.dir) continue;
+            String n = e.name.toLowerCase(Locale.US);
+            if (!n.endsWith(".txt") || !n.contains("scatter")) continue;
+            if (n.equals("android_scatter.txt")) return e;
+            if (best == null) best = e;
         }
-        if (transport != null) {
-            transport.close();
-            transport = null;
-            brom = null;
-            da = null;
-            status("terputus");
-            log("koneksi ditutup");
-        }
+        return best;
     }
 
-    private void doChipInfo() {
-        if (brom == null) {
-            toast("connect dulu");
-            return;
-        }
-        runBg("info", () -> {
-            brom.getBromVersion();
-            brom.getHwCode();
-            brom.getHwSwVersion();
-            try {
-                brom.getTargetConfig();
-            } catch (IOException e) {
-                log("target config tidak didukung chip ini: " + e.getMessage());
+    private void buildTable() {
+        tableBox.removeAllViews();
+        if (scatter == null) return;
+
+        TextView head = new TextView(this);
+        head.setText("   partisi         image                        ukuran");
+        head.setTextColor(Color.parseColor("#6f7c93"));
+        head.setTextSize(9);
+        head.setTypeface(Typeface.MONOSPACE);
+        head.setPadding(dp(4), dp(6), dp(4), dp(4));
+        tableBox.addView(head);
+
+        for (Row r : rows) {
+            CheckBox cb = new CheckBox(this);
+            cb.setTextSize(10);
+            cb.setTypeface(Typeface.MONOSPACE);
+            cb.setPadding(dp(2), dp(2), dp(2), dp(2));
+
+            boolean usable = r.file != null && !r.blocked;
+            cb.setTextColor(Color.parseColor(usable ? "#dfe6f2" : "#5d6779"));
+
+            String size = "-";
+            if (r.file != null) {
+                size = r.file.size > 0 ? FastbootProtocol.human(r.file.size) : "?";
             }
-            return null;
-        });
+            String line = String.format(Locale.US, "%-14s %-24s %8s",
+                    r.p.name,
+                    r.p.fileName == null || r.p.fileName.isEmpty() ? "-" : r.p.fileName,
+                    size);
+            if (!r.note.isEmpty()) line = line + "  " + r.note;
+            cb.setText(line);
+
+            cb.setEnabled(usable);
+            cb.setChecked(usable && r.p.download);
+            cb.setOnCheckedChangeListener((v, checked) -> updateFlashBtn());
+            r.cb = cb;
+            tableBox.addView(cb);
+        }
+        updateFlashBtn();
     }
 
-    private void doUploadDa() {
-        if (brom == null) {
-            toast("connect dulu");
-            return;
-        }
-        if (daFile == null) {
-            toast("pilih file DA dulu");
-            return;
-        }
-        runBg("unggah DA", () -> {
-            List<DaLoader.DaImage> list = DaLoader.load(daFile);
-            log("DA ditemukan: " + list.size() + " image");
-            DaLoader.DaImage pick = list.get(0);
-            if (list.size() > 1) {
-                log("memakai image pertama; kalau salah, pilih DA tunggal untuk chip ini");
-            }
-            log("  " + pick);
-            daLoadAddr = pick.loadAddr;
-
-            brom.sendDa(daLoadAddr, pick.data, 0,
-                    (pct, msg) -> status("DA " + pct + "%"));
-
-            brom.jumpDa(daLoadAddr);
-            log("menunggu DA aktif...");
-            sleep(600);
-
-            da = new DaProtocol(transport, this);
-            da.sync();
-            status("DA aktif, siap menulis");
-            return null;
-        });
+    private void updateFlashBtn() {
+        int n = 0;
+        for (Row r : rows) if (r.cb != null && r.cb.isChecked()) n++;
+        flashBtn.setText(n == 0 ? "Flash terpilih" : "Flash " + n + " partisi");
     }
 
-    private void doFlash() {
-        if (brom == null) {
-            toast("connect dulu");
+    private void checkReady() {
+        for (Row r : rows) {
+            if (r.cb != null && r.cb.isEnabled()) r.cb.setChecked(true);
+        }
+        updateFlashBtn();
+    }
+
+    private void clearChecks() {
+        for (Row r : rows) if (r.cb != null) r.cb.setChecked(false);
+        updateFlashBtn();
+    }
+
+    private void confirmFlash() {
+        if (fastboot == null) {
+            toast("FB scan dulu, HP harus di mode fastboot");
             return;
         }
-        if (da == null) {
-            toast("unggah DA dulu");
+        List<Row> pick = new ArrayList<>();
+        for (Row r : rows) {
+            if (r.cb != null && r.cb.isChecked() && r.file != null && !r.blocked) pick.add(r);
+        }
+        if (pick.isEmpty()) {
+            toast("belum ada partisi dicentang");
             return;
         }
-        if (scatter == null) {
-            toast("pilih file scatter dulu");
-            return;
+
+        StringBuilder sb = new StringBuilder();
+        for (Row r : pick) {
+            sb.append("\n  ").append(fbName(r.p.name)).append("  <-  ").append(r.p.fileName);
         }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Flash " + pick.size() + " partisi?")
+                .setMessage("Yang akan ditulis:" + sb
+                        + "\n\nJangan cabut kabel sampai selesai. Salah partisi bisa brick.")
+                .setNegativeButton("Batal", null)
+                .setPositiveButton("Flash", (d, w) -> doFlash(pick))
+                .show();
+    }
+
+    private void doFlash(List<Row> pick) {
         runBg("flash", () -> {
-            File dir = scatterFile().getParentFile();
-            log("folder image: " + dir);
-            int done = 0, skipped = 0, failed = 0;
-
-            for (ScatterParser.Partition p : scatter.partitions) {
-                if (!p.download || !p.hasImage()) {
-                    skipped++;
+            int ok = 0, fail = 0;
+            for (Row r : pick) {
+                String part = fbName(r.p.name);
+                long size = RomFolder.size(this, r.file.uri, r.file.size);
+                if (size <= 0) {
+                    log("lewati " + part + ": ukuran berkas tidak terbaca");
+                    fail++;
                     continue;
                 }
-                File img = new File(dir, p.fileName);
-                if (!img.exists()) {
-                    log("  lewati " + p.name + ": " + p.fileName + " tidak ada");
-                    skipped++;
-                    continue;
-                }
-                try {
-                    byte[] data = readFile(img);
-                    status("menulis " + p.name);
-                    log(String.format("tulis %-20s %10d byte -> 0x%08X",
-                            p.name, data.length, p.physicalAddr));
-                    da.writeData((int) p.physicalAddr, data, (pct, m) -> {
-                    });
-                    done++;
-                } catch (Exception ex) {
-                    log("  GAGAL " + p.name + ": " + ex.getMessage());
-                    failed++;
+                log(String.format(Locale.US, "tulis %-14s <- %-24s %8s",
+                        part, r.file.name, FastbootProtocol.human(size)));
+                status("flash " + part);
+                try (InputStream in = RomFolder.open(this, r.file.uri)) {
+                    fastboot.flashStream(part, size, in,
+                            (pct, msg) -> status(part + " " + pct + "% " + msg));
+                    log("  OK " + part);
+                    ok++;
+                } catch (Exception e) {
+                    log("  GAGAL " + part + ": " + e.getMessage());
+                    fail++;
                 }
             }
-
-            try {
-                da.finish();
-            } catch (Exception ex) {
-                log("finish: " + ex.getMessage());
-            }
-
-            log(String.format("selesai: %d ditulis, %d dilewati, %d gagal",
-                    done, skipped, failed));
-            status("flash selesai");
+            log(String.format(Locale.US, "selesai: %d berhasil, %d gagal", ok, fail));
+            status(fail == 0 ? "flash selesai" : "flash selesai, " + fail + " gagal");
+            if (fail == 0) log("semua partisi terpilih sudah ditulis.");
             return null;
         });
     }
 
-    private void doReadPartition() {
-        if (da == null) {
-            toast("unggah DA dulu");
-            return;
-        }
-        runBg("baca", () -> {
-            byte[] pt = da.readPartitionTable();
-            log("tabel partisi dibaca: " + pt.length + " byte");
-            int nonzero = 0;
-            for (byte x : pt) if (x != 0) nonzero++;
-            log("byte tidak nol: " + nonzero);
-            return null;
-        });
+    private static String fbName(String scatterName) {
+        String n = scatterName == null ? "" : scatterName.toLowerCase(Locale.US).trim();
+        String alias = FB_ALIAS.get(n);
+        return alias == null ? n : alias;
     }
 
     private void doFastbootScan() {
-        UsbDevice found = null;
+        UsbDevice target = null;
         for (UsbDevice d : usbManager.getDeviceList().values()) {
             if (FastbootProtocol.isFastboot(d)) {
-                found = d;
+                target = d;
                 break;
             }
         }
-        if (found == null) {
+        if (target == null) {
             log("tidak ada perangkat dengan antarmuka fastboot (FF/42/03)");
-            log("pastikan HP sudah di mode fastboot/bootloader dan bootloader unlocked");
-            toast("perangkat fastboot tidak ditemukan");
+            log("pastikan HP sudah di mode fastboot/bootloader");
+            status("fastboot tidak ditemukan");
             return;
         }
-        log(String.format(Locale.US, "fastboot ditemukan: %s VID=%04X PID=%04X",
-                found.getDeviceName(), found.getVendorId(), found.getProductId()));
-        status("fastboot: " + found.getDeviceName());
-
-        final UsbDevice dev = found;
-        if (!usbManager.hasPermission(dev)) {
-            log("minta izin USB...");
-            int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_IMMUTABLE : 0;
-            usbManager.requestPermission(dev, PendingIntent.getBroadcast(this, 0,
-                    new Intent(ACTION_USB_PERM).setPackage(getPackageName()), flags));
-            return;
+        wantFastboot = true;
+        if (usbManager.hasPermission(target)) {
+            openFastboot(target);
+        } else {
+            int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
+            PendingIntent pi = PendingIntent.getBroadcast(this, 0,
+                    new Intent(ACTION_USB_PERM).setPackage(getPackageName()), flags);
+            usbManager.requestPermission(target, pi);
+            status("menunggu izin USB");
         }
-        openFastboot(dev);
     }
 
     private void openFastboot(UsbDevice d) {
-        runBg("fastboot open", () -> {
-            if (fastboot != null) {
-                fastboot.close();
-                fastboot = null;
+        runBg("buka fastboot", () -> {
+            closeTransport();
+            FastbootProtocol fb = new FastbootProtocol(usbManager, d);
+            fastboot = fb;
+            log("fastboot terhubung: " + d.getDeviceName());
+            log(String.format(Locale.US, "  %-20s %s", "product", safeGetVar(fb, "product")));
+            log(String.format(Locale.US, "  %-20s %s", "unlocked", safeGetVar(fb, "unlocked")));
+            log(String.format(Locale.US, "  %-20s %s", "max-download-size",
+                    safeGetVar(fb, "max-download-size")));
+            if ("no".equalsIgnoreCase(safeGetVar(fb, "unlocked"))) {
+                log("bootloader masih terkunci, flash akan ditolak.");
             }
-            fastboot = new FastbootProtocol(usbManager, d);
-            log("fastboot terhubung");
+            status("fastboot siap");
             return null;
         });
+    }
+
+    private String safeGetVar(FastbootProtocol fb, String name) {
+        try {
+            return fb.getVar(name);
+        } catch (Exception e) {
+            return "?";
+        }
     }
 
     private void doFastbootInfo() {
@@ -485,144 +562,145 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         }
         runBg("fb info", () -> {
             String[] vars = {"product", "variant", "serialno", "version-bootloader",
-                    "version-baseband", "current-slot", "max-download-size",
-                    "unlocked", "secure", "slot-count"};
+                    "version-baseband", "current-slot", "slot-count", "max-download-size",
+                    "unlocked", "secure", "partition-type:boot", "partition-size:boot"};
             for (String v : vars) {
-                try {
-                    log(String.format("  %-20s %s", v, fastboot.getVar(v)));
-                } catch (IOException e) {
-                    log(String.format("  %-20s (tidak tersedia)", v));
-                }
+                log(String.format(Locale.US, "  %-22s %s", v, safeGetVar(fastboot, v)));
             }
             status("info fastboot selesai");
             return null;
         });
     }
 
-    private void doFastbootFlash() {
-        if (fastboot == null) {
-            toast("FB scan dulu");
+    private void doConnectBrom() {
+        UsbDevice target = null;
+        for (UsbDevice d : usbManager.getDeviceList().values()) {
+            if (d.getVendorId() == UsbTransport.MTK_VID) {
+                target = d;
+                break;
+            }
+        }
+        if (target == null) {
+            log("tidak ada perangkat MediaTek 0x0E8D");
+            log("BROM hanya untuk baca info chip; flashing memakai fastboot");
+            status("BROM tidak ditemukan");
             return;
         }
-        if (fbImage == null) {
-            pickFile(REQ_FB_IMG, "*/*");
-            toast("pilih file image dulu, lalu tekan FB flash lagi");
-            return;
+        wantFastboot = false;
+        if (usbManager.hasPermission(target)) {
+            openBrom(target);
+        } else {
+            int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
+            PendingIntent pi = PendingIntent.getBroadcast(this, 0,
+                    new Intent(ACTION_USB_PERM).setPackage(getPackageName()), flags);
+            usbManager.requestPermission(target, pi);
+            status("menunggu izin USB");
         }
-        String part = partInput.getText().toString().trim();
-        if (part.isEmpty()) {
-            toast("isi nama partisi");
-            return;
-        }
-        runBg("fb flash", () -> {
-            byte[] img = readFile(fbImage);
-            log(String.format("flash %s <- %s (%d byte)",
-                    part, fbImage.getName(), img.length));
-            status("fastboot flash " + part);
-            fastboot.flash(part, img, (pct, m) -> status("FB " + pct + "%"));
-            log("OKAY — " + part + " tertulis");
-            status("flash selesai");
+    }
+
+    private void openBrom(UsbDevice d) {
+        runBg("buka BROM", () -> {
+            closeTransport();
+            UsbTransport t = new UsbTransport(usbManager, d);
+            brom = new BromProtocol(t, this);
+            transport = t;
+            log("BROM terhubung: " + d.getDeviceName()
+                    + String.format(Locale.US, " (VID %04X PID %04X)",
+                    d.getVendorId(), d.getProductId()));
+            status("BROM siap");
             return null;
         });
     }
 
-    private File scatterFile() {
-        return new File(scatterPath);
-    }
-
-    private String scatterPath = "";
-
-    private void pickFile(int req, String mime) {
-        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
-        i.setType(mime);
-        i.addCategory(Intent.CATEGORY_OPENABLE);
-        try {
-            startActivityForResult(Intent.createChooser(i, "pilih file"), req);
-        } catch (Exception e) {
-            toast("tidak ada aplikasi pemilih berkas");
+    private void doChipInfo() {
+        if (brom == null) {
+            toast("Connect BROM dulu");
+            return;
         }
-    }
-
-    @Override
-    protected void onActivityResult(int req, int res, Intent data) {
-        super.onActivityResult(req, res, data);
-        if (res != RESULT_OK || data == null || data.getData() == null) return;
-        Uri uri = data.getData();
-        try {
-            String name = req == REQ_DA ? "da.bin"
-                    : req == REQ_FB_IMG ? "fb_image.img" : "scatter.txt";
-            File tmp = copyToCache(uri, name);
-            if (req == REQ_DA) {
-                daFile = tmp;
-                log("DA dipilih: " + tmp.getAbsolutePath() + " (" + tmp.length() + " byte)");
-            } else if (req == REQ_FB_IMG) {
-                fbImage = tmp;
-                log("image fastboot dipilih: " + tmp.getAbsolutePath()
-                        + " (" + tmp.length() + " byte)");
-                status("siap flash fastboot: " + tmp.length() + " byte");
-            } else {
-                scatterPath = tmp.getAbsolutePath();
-                scatter = ScatterParser.parse(tmp);
-                log("scatter: platform=" + scatter.platform
-                        + " project=" + scatter.project
-                        + " storage=" + scatter.storage);
-                log("partisi: " + scatter.partitions.size());
-                for (ScatterParser.Partition p : scatter.partitions) {
-                    log("  " + p);
-                }
-                status("scatter dimuat: " + scatter.partitions.size() + " partisi");
+        runBg("info chip", () -> {
+            brom.handshake(4);
+            log(String.format(Locale.US, "BROM version  : 0x%04X", brom.getBromVersion()));
+            log(String.format(Locale.US, "HW code       : 0x%04X", brom.getHwCode()));
+            int[] v = brom.getHwSwVersion();
+            log(String.format(Locale.US, "HW/SW version : 0x%04X / 0x%04X", v[0], v[1]));
+            try {
+                log(String.format(Locale.US, "Target config : 0x%08X", brom.getTargetConfig()));
+            } catch (Exception e) {
+                log("target config tidak didukung chip ini");
             }
-        } catch (Exception e) {
-            log("gagal membaca berkas: " + e.getMessage());
-        }
+            status("info chip selesai");
+            return null;
+        });
     }
 
-    private File copyToCache(Uri uri, String name) throws IOException {
-        File out = new File(getCacheDir(), name);
-        try (InputStream in = getContentResolver().openInputStream(uri);
-             FileOutputStream fos = new FileOutputStream(out)) {
-            if (in == null) throw new IOException("stream kosong");
-            byte[] buf = new byte[65536];
-            int n;
-            while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
-        }
-        return out;
+    private void doDisconnect() {
+        closeTransport();
+        status("terputus");
     }
 
-    private static byte[] readFile(File f) throws IOException {
-        long len = f.length();
-        if (len <= 0 || len > 512L * 1024 * 1024) throw new IOException("ukuran tidak wajar");
-        byte[] b = new byte[(int) len];
-        try (InputStream in = new java.io.FileInputStream(f)) {
-            int off = 0;
-            while (off < b.length) {
-                int n = in.read(b, off, b.length - off);
-                if (n <= 0) break;
-                off += n;
+    private void closeTransport() {
+        FastbootProtocol fb = fastboot;
+        fastboot = null;
+        if (fb != null) {
+            try {
+                fb.close();
+            } catch (Exception ignored) {
             }
         }
-        return b;
-    }
-
-    private static void sleep(int ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException ignored) {
+        UsbTransport t = transport;
+        transport = null;
+        brom = null;
+        if (t != null) {
+            try {
+                t.close();
+            } catch (Exception ignored) {
+            }
         }
     }
 
-    private interface Job {
-        Object run() throws Exception;
+    private void refreshDeviceList() {
+        int mtk = 0, fb = 0;
+        for (UsbDevice d : usbManager.getDeviceList().values()) {
+            if (d.getVendorId() == UsbTransport.MTK_VID) mtk++;
+            if (FastbootProtocol.isFastboot(d)) fb++;
+        }
+        status(String.format(Locale.US, "perangkat: %d MediaTek, %d fastboot", mtk, fb));
+        if (mtk > 0 || fb > 0) {
+            log(String.format(Locale.US, "USB: %d MediaTek, %d fastboot", mtk, fb));
+        }
     }
 
     private void runBg(String name, Job job) {
+        status(name + "...");
         new Thread(() -> {
             try {
                 job.run();
             } catch (Exception e) {
-                log("[" + name + "] gagal: " + e.getMessage());
+                String msg = e.getMessage() == null ? e.toString() : e.getMessage();
+                log(name + " gagal: " + msg);
                 status(name + " gagal");
             }
         }, name).start();
+    }
+
+    private void log(String s) {
+        String t = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+        ui.post(() -> {
+            logLines.add(t + "  " + s);
+            if (logLines.size() > 600) logLines.remove(0);
+            StringBuilder sb = new StringBuilder();
+            for (String l : logLines) sb.append(l).append('\n');
+            if (logView != null) logView.setText(sb.toString());
+        });
+    }
+
+    private void status(String s) {
+        ui.post(() -> {
+            if (statusView != null) statusView.setText(s);
+        });
+    }
+
+    private void toast(String s) {
+        ui.post(() -> Toast.makeText(this, s, Toast.LENGTH_SHORT).show());
     }
 }

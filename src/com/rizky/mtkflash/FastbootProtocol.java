@@ -7,7 +7,9 @@ import android.hardware.usb.UsbEndpoint;
 import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 
@@ -137,26 +139,45 @@ public class FastbootProtocol {
 
     public void flash(String partition, byte[] image, BromProtocol.Progress progress)
             throws IOException {
-        long max = maxDownloadSize();
-        if (image.length > max) {
-            throw new IOException(String.format(
-                    "image %d byte melebihi batas bootloader (%d byte)", image.length, max));
+        flashStream(partition, image.length, new ByteArrayInputStream(image), progress);
+    }
+
+    public void flashStream(String partition, long length, InputStream in,
+                            BromProtocol.Progress progress) throws IOException {
+        if (length <= 0) {
+            throw new IOException("ukuran image tidak diketahui untuk " + partition);
         }
 
-        Response d = command(String.format(Locale.US, "download:%08x", image.length));
+        long max = maxDownloadSize();
+        if (max > 0 && length > max) {
+            throw new IOException(String.format(Locale.US,
+                    "image %s byte melebihi batas bootloader (%s byte) — partisi ini harus lewat PC",
+                    human(length), human(max)));
+        }
+
+        Response d = command(String.format(Locale.US, "download:%08x", length));
         if (!"DATA".equals(d.status)) {
             throw new IOException("bootloader menolak download — " + d);
         }
 
-        int off = 0;
-        while (off < image.length) {
-            int chunk = Math.min(image.length - off, 1048576);
-            int n = connection.bulkTransfer(epOut, image, off, chunk, 15000);
-            if (n <= 0) throw new IOException("gagal mengirim data di offset " + off);
-            off += n;
+        byte[] buf = new byte[1048576];
+        long sent = 0;
+        while (sent < length) {
+            int want = (int) Math.min(buf.length, length - sent);
+            int got = in.read(buf, 0, want);
+            if (got <= 0) {
+                throw new IOException("berkas berakhir di " + sent + "/" + length + " byte");
+            }
+            int off = 0;
+            while (off < got) {
+                int n = connection.bulkTransfer(epOut, buf, off, got - off, 15000);
+                if (n <= 0) throw new IOException("gagal mengirim data di offset " + (sent + off));
+                off += n;
+            }
+            sent += got;
             if (progress != null) {
-                progress.onProgress(off * 100 / image.length,
-                        "kirim " + off + "/" + image.length);
+                progress.onProgress((int) (sent * 100 / length),
+                        "kirim " + human(sent) + "/" + human(length));
             }
         }
 
@@ -165,6 +186,13 @@ public class FastbootProtocol {
 
         Response f = command("flash:" + partition);
         if (!f.ok()) throw new IOException("flash " + partition + " gagal — " + f);
+    }
+
+    public static String human(long v) {
+        if (v < 1024) return v + " B";
+        if (v < 1048576) return String.format(Locale.US, "%.1f KB", v / 1024.0);
+        if (v < 1073741824L) return String.format(Locale.US, "%.1f MB", v / 1048576.0);
+        return String.format(Locale.US, "%.2f GB", v / 1073741824.0);
     }
 
     public void erase(String partition) throws IOException {

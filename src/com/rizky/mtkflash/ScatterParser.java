@@ -2,8 +2,10 @@ package com.rizky.mtkflash;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -56,10 +58,16 @@ public class ScatterParser {
     }
 
     public static Scatter parse(File f) throws IOException {
+        try (InputStream in = new FileInputStream(f)) {
+            return parse(in);
+        }
+    }
+
+    public static Scatter parse(InputStream in) throws IOException {
         Scatter sc = new Scatter();
         Map<String, String> cur = null;
 
-        try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(in, "UTF-8"))) {
             String line;
             while ((line = r.readLine()) != null) {
                 String s = line.trim();

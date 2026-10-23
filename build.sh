@@ -54,7 +54,7 @@ echo "=== 2. link resource + manifest ==="
   --java "$OUT/classes" \
   --min-sdk-version 24 \
   --target-sdk-version 34 \
-  --version-code 1 --version-name 1.0 \
+  --version-code 2 --version-name 1.1.0 \
   "$OUT/res/res.zip"
 
 echo "=== 3. kompilasi Java ==="
