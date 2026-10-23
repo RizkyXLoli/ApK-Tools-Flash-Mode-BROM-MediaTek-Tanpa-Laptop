@@ -238,7 +238,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                 btn("Connect BROM", this::doConnectBrom),
                 btn("Info chip", this::doChipInfo),
                 btn("Dump partisi", this::startDump),
-                btn("Dump BROM", this::startBromDump)));
+                btn("Dump BROM", this::startBromDump),
+                btn("Terminal", this::openTerminal)));
 
         return root;
     }
@@ -919,8 +920,18 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             }
         }
         if (target == null) {
-            log("tidak ada perangkat MediaTek 0x0E8D");
-            log("BROM hanya untuk baca info chip; flashing memakai fastboot");
+            log("BROM tidak terdeteksi: tidak ada USB dengan VID 0x0E8D");
+            log("yang perlu dicek: OTG nyala, kabel data (bukan kabel charge), "
+                    + "HP target sudah dimatikan lalu dicolok sambil tahan volume");
+            log("perangkat USB yang terbaca sekarang:");
+            int n = 0;
+            for (UsbDevice d : usbManager.getDeviceList().values()) {
+                n++;
+                log(String.format(Locale.US, "  %04X:%04X  %s",
+                        d.getVendorId(), d.getProductId(),
+                        d.getProductName() == null ? "?" : d.getProductName()));
+            }
+            if (n == 0) log("  (kosong, tidak ada apa pun di port OTG)");
             status("BROM tidak ditemukan");
             return;
         }
@@ -974,6 +985,24 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private void doDisconnect() {
         closeTransport();
         status("terputus");
+    }
+
+    private void openTerminal() {
+        if (transport != null || fastboot != null) {
+            closeTransport();
+            status("koneksi dilepas untuk terminal");
+        }
+        try {
+            startActivity(new Intent(this, TerminalActivity.class));
+        } catch (Exception e) {
+            log("tidak bisa membuka terminal: " + e);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshDeviceList();
     }
 
     private void closeTransport() {

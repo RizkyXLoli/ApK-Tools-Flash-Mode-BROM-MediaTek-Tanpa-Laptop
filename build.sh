@@ -47,6 +47,9 @@ echo "=== 1. kompilasi resource ==="
 "$BT/aapt2" compile --dir "$SRC/res" -o "$OUT/res/res.zip"
 
 echo "=== 2. link resource + manifest ==="
+VC="$(grep -o 'android:versionCode="[0-9]*"' "$SRC/AndroidManifest.xml" | grep -o '[0-9]*' | head -1)"
+VN="$(grep -o 'android:versionName="[^"]*"' "$SRC/AndroidManifest.xml" | sed 's/.*="//; s/"$//' | head -1)"
+echo "versi    : ${VN:-?} (code ${VC:-?})"
 "$BT/aapt2" link \
   -o "$OUT/base.apk" \
   -I "$PLATFORM" \
@@ -54,7 +57,8 @@ echo "=== 2. link resource + manifest ==="
   --java "$OUT/classes" \
   --min-sdk-version 24 \
   --target-sdk-version 34 \
-  --version-code 5 --version-name 1.3.0 \
+  ${VC:+--version-code "$VC"} \
+  ${VN:+--version-name "$VN"} \
   "$OUT/res/res.zip"
 
 echo "=== 3. kompilasi Java ==="
