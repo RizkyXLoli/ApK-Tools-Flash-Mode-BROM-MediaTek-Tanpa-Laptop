@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
@@ -15,6 +16,9 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.provider.OpenableColumns;
 import android.text.InputType;
 import android.text.method.ScrollingMovementMethod;
@@ -52,6 +56,22 @@ public class TerminalActivity extends Activity {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final StringBuilder out = new StringBuilder();
+    private final StringBuilder pending = new StringBuilder();
+    private final Object lock = new Object();
+
+    private static final int MAX_CHARS = 48000;
+    private static final int TRIM_TO = 32000;
+    private static final int DRAIN_DELAY_MS = 32;
+    private static final long VIBE_GAP_MS = 130;
+    private static final String PREF = "mtkflash";
+
+    private boolean drainQueued;
+    private boolean scrollQueued;
+    private boolean vibrateOn = true;
+    private long lastVibe;
+    private Vibrator vibrator;
+    private Button vibBtn;
+    private SharedPreferences prefs;
 
     private UsbManager usbManager;
     private TextView outView;
@@ -95,6 +115,8 @@ public class TerminalActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        prefs = getSharedPreferences(PREF, MODE_PRIVATE);
+        vibrateOn = prefs.getBoolean("vibrate", true);
         setContentView(buildUi());
 
         IntentFilter f = new IntentFilter();
@@ -114,6 +136,7 @@ public class TerminalActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        ui.removeCallbacks(drain);
         try {
             unregisterReceiver(usbReceiver);
         } catch (Exception ignored) {
@@ -183,13 +206,29 @@ public class TerminalActivity extends Activity {
         bAdb.setOnClickListener(v -> runLine("adb devices"));
         Button bProp = btn("adb shell getprop");
         bProp.setOnClickListener(v -> runLine("adb shell getprop"));
+        root.addView(row(bDev, bVar, bAdb, bProp));
+
+        vibBtn = btn(vibLabel());
+        vibBtn.setOnClickListener(v -> {
+            vibrateOn = !vibrateOn;
+            prefs.edit().putBoolean("vibrate", vibrateOn).apply();
+            vibBtn.setText(vibLabel());
+            if (vibrateOn) {
+                lastVibe = 0;
+                vibe();
+            }
+        });
         Button bClr = btn("clear");
         bClr.setOnClickListener(v -> clearOut());
         Button bBack = btn("kembali");
         bBack.setOnClickListener(v -> finish());
-        root.addView(row(bDev, bVar, bAdb, bProp, bClr, bBack));
+        root.addView(row(vibBtn, bClr, bBack));
 
         return root;
+    }
+
+    private String vibLabel() {
+        return vibrateOn ? "getar: ON" : "getar: OFF";
     }
 
     private Button btn(String text) {
@@ -239,15 +278,86 @@ public class TerminalActivity extends Activity {
     }
 
     private void echo(String s) {
-        ui.post(() -> {
-            out.append(s).append('\n');
-            if (out.length() > 400000) out.delete(0, out.length() - 300000);
-            if (outView != null) outView.setText(out.toString());
-            if (outScroll != null) outScroll.post(() -> outScroll.fullScroll(View.FOCUS_DOWN));
+        synchronized (lock) {
+            pending.append(s == null ? "" : s).append('\n');
+            if (pending.length() > MAX_CHARS) {
+                pending.delete(0, pending.length() - TRIM_TO);
+                int nl = pending.indexOf("\n");
+                if (nl >= 0) pending.delete(0, nl + 1);
+            }
+            if (drainQueued) return;
+            drainQueued = true;
+        }
+        ui.postDelayed(drain, DRAIN_DELAY_MS);
+    }
+
+    private final Runnable drain = new Runnable() {
+        @Override
+        public void run() {
+            String chunk;
+            synchronized (lock) {
+                drainQueued = false;
+                if (pending.length() == 0) return;
+                chunk = pending.toString();
+                pending.setLength(0);
+            }
+            if (outView == null) return;
+            boolean rewrote = false;
+            out.append(chunk);
+            if (out.length() > MAX_CHARS) {
+                int cut = out.length() - TRIM_TO;
+                int nl = out.indexOf("\n", cut);
+                out.delete(0, nl >= 0 ? nl + 1 : cut);
+                rewrote = true;
+            }
+            if (rewrote) {
+                outView.setText(out.toString());
+            } else {
+                outView.append(chunk);
+            }
+            followBottom();
+            vibe();
+            synchronized (lock) {
+                if (pending.length() > 0 && !drainQueued) {
+                    drainQueued = true;
+                    ui.postDelayed(drain, DRAIN_DELAY_MS);
+                }
+            }
+        }
+    };
+
+    private void followBottom() {
+        if (outScroll == null || scrollQueued) return;
+        scrollQueued = true;
+        outScroll.post(() -> {
+            scrollQueued = false;
+            View child = outScroll.getChildAt(0);
+            if (child == null) return;
+            outScroll.scrollTo(0, Math.max(0, child.getHeight() - outScroll.getHeight()));
         });
     }
 
+    private void vibe() {
+        if (!vibrateOn) return;
+        long now = SystemClock.uptimeMillis();
+        if (now - lastVibe < VIBE_GAP_MS) return;
+        lastVibe = now;
+        try {
+            if (vibrator == null) vibrator = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator == null || !vibrator.hasVibrator()) return;
+            if (Build.VERSION.SDK_INT >= 26) {
+                vibrator.vibrate(VibrationEffect.createOneShot(14, VibrationEffect.DEFAULT_AMPLITUDE));
+            } else {
+                vibrator.vibrate(14);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     private void clearOut() {
+        synchronized (lock) {
+            pending.setLength(0);
+        }
         ui.post(() -> {
             out.setLength(0);
             if (outView != null) outView.setText("");
