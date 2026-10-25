@@ -7,6 +7,7 @@ import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 
 import java.io.IOException;
+import java.util.Locale;
 
 public class UsbTransport {
 
@@ -112,6 +113,41 @@ public class UsbTransport {
 
     public byte[] read(int len) throws IOException {
         return read(len, timeoutMs);
+    }
+
+    /**
+     * Control transfer. The BROM compares wIndex against its own var1 before
+     * honouring a class request, so the exploit needs this path, not just bulk.
+     *
+     * @param requestType bmRequestType (0xA1 = IN class/device, 0x21 = OUT)
+     * @param data        payload for OUT transfers, null for IN
+     * @param length      bytes to read for IN transfers (ignored for OUT)
+     */
+    public byte[] control(int requestType, int request, int value, int index,
+                          byte[] data, int length) throws IOException {
+        if ((requestType & 0x80) != 0) {
+            byte[] buf = new byte[length];
+            int n = connection.controlTransfer(requestType, request, value, index, buf, length, timeoutMs);
+            if (n < 0) {
+                throw new IOException(String.format(Locale.US,
+                        "control transfer IN gagal (bmRequestType %02X bRequest %02X wIndex %04X)",
+                        requestType, request, index));
+            }
+            if (n == length) {
+                return buf;
+            }
+            byte[] out = new byte[n];
+            System.arraycopy(buf, 0, out, 0, n);
+            return out;
+        }
+        int n = connection.controlTransfer(requestType, request, value, index,
+                data, data == null ? 0 : data.length, timeoutMs);
+        if (n < 0) {
+            throw new IOException(String.format(Locale.US,
+                    "control transfer OUT gagal (bmRequestType %02X bRequest %02X wIndex %04X)",
+                    requestType, request, index));
+        }
+        return new byte[0];
     }
 
     public void drain() {

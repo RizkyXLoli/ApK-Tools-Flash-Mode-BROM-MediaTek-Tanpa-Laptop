@@ -30,6 +30,9 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.rizky.mtkflash.auth.AuthBypass;
+import com.rizky.mtkflash.auth.UsbBromLink;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -240,6 +243,10 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                 btn("Dump partisi", this::startDump),
                 btn("Dump BROM", this::startBromDump),
                 btn("Terminal", this::openTerminal)));
+
+        root.addView(row(
+                btn("Bypass auth", () -> doBypassAuth(false)),
+                btn("Bypass kamakiri2", () -> doBypassAuth(true))));
 
         return root;
     }
@@ -978,6 +985,35 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                 log("target config tidak didukung chip ini");
             }
             status("info chip selesai");
+            return null;
+        });
+    }
+
+    private void doBypassAuth(boolean kamakiri2) {
+        if (brom == null || transport == null) {
+            toast("Connect BROM dulu");
+            return;
+        }
+        final boolean useK2 = kamakiri2;
+        runBg(useK2 ? "bypass kamakiri2" : "bypass auth", () -> {
+            UsbBromLink link = new UsbBromLink(transport);
+            AuthBypass ab = new AuthBypass(link, this::log);
+            AuthBypass.Options o = new AuthBypass.Options();
+            o.var1 = -1;
+            o.maxVar1 = 0x20;
+            o.kamakiri2 = useK2;
+            o.skipAftermath = false;
+            log("bypass: primitive=" + (useK2 ? "kamakiri2 (SET_LINE_CODING)" : "kamakiri (0xE0)"));
+            AuthBypass.Result r = ab.run(o);
+            log("");
+            log("=== hasil bypass ===");
+            for (String line : r.summary().split("\n")) log(line);
+            if (!r.evidence.isEmpty()) {
+                log("--- evidence ---");
+                for (String e : r.evidence) log("  " + e);
+            }
+            status(r.success ? "bypass OK" : "bypass gagal");
+            if (r.success) toast("bypass OK: blacklist hilang, DA unsigned diterima");
             return null;
         });
     }
