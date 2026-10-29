@@ -105,6 +105,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private boolean scanning;
     private int scanKind;
     private int scanElapsed;
+    private Runnable pendingAction;
+    private int pendingKind;
 
     private TextView statusView;
     private TextView logView;
@@ -754,7 +756,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void confirmFlash() {
         if (fastboot == null) {
-            toast("Sambungkan Fastboot dulu, HP harus di mode fastboot");
+            standbyFor(KIND_FB, this::confirmFlash, "flash");
             return;
         }
         List<Row> pick = new ArrayList<>();
@@ -852,7 +854,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void startDump() {
         if (fastboot == null) {
-            toast("Sambungkan Fastboot dulu, HP harus di mode fastboot");
+            standbyFor(KIND_FB, this::startDump, "dump partisi");
             return;
         }
         final List<String> q = new ArrayList<>();
@@ -953,7 +955,8 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             if ("no".equalsIgnoreCase(safeGetVar(fb, "unlocked"))) {
                 log("bootloader masih terkunci, flash akan ditolak.");
             }
-            status("fastboot siap — lanjut pilih menu Flash / Dump");
+            status("fastboot tersambung.");
+            ui.post(() -> runPending(KIND_FB));
             return null;
         });
     }
@@ -968,7 +971,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void doFastbootInfo() {
         if (fastboot == null) {
-            toast("Sambungkan Fastboot dulu");
+            standbyFor(KIND_FB, this::doFastbootInfo, "info fastboot");
             return;
         }
         runBg("fb info", () -> {
@@ -996,14 +999,15 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             brom = bp;
             bromDevice = d;
             log("HP tersambung (mode BROM).");
-            status("BROM siap — lanjut pilih menu Info chip / Bypass / Dump BROM");
+            status("BROM tersambung.");
+            ui.post(() -> runPending(KIND_BROM));
             return null;
         });
     }
 
     private void doChipInfo() {
         if (brom == null) {
-            toast("Sambungkan BROM dulu");
+            standbyFor(KIND_BROM, this::doChipInfo, "info chip");
             return;
         }
         runBg("info chip", () -> {
@@ -1024,7 +1028,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void doBypassAuth(boolean kamakiri2) {
         if (brom == null || transport == null) {
-            toast("Sambungkan BROM dulu");
+            standbyFor(KIND_BROM, () -> doBypassAuth(kamakiri2), "bypass auth");
             return;
         }
         final boolean useK2 = kamakiri2;
@@ -1079,6 +1083,22 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         }
     }
 
+    private void standbyFor(int kind, Runnable whenReady, String what) {
+        pendingAction = whenReady;
+        pendingKind = kind;
+        String t = kind == KIND_FB ? "fastboot" : "mode BROM";
+        log("menu dipilih: " + what + ". Masuk mode tunggu deteksi " + t + ".");
+        beginSearch(kind);
+    }
+
+    private void runPending(int kind) {
+        if (pendingAction == null || pendingKind != kind) return;
+        Runnable r = pendingAction;
+        pendingAction = null;
+        pendingKind = 0;
+        r.run();
+    }
+
     private void beginSearch(int kind) {
         scanning = true;
         scanKind = kind;
@@ -1115,7 +1135,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                 log("HP tidak terdeteksi selama " + scanElapsed + " detik.");
                 log("Cek: kabel itu kabel data (bukan charger), HP sudah mati,");
                 log("dan sudah dicolok sambil menahan tombol yang benar (" + t + ").");
-                status(t + " tidak ditemukan — tekan menu Sambungkan untuk coba lagi");
+                status(t + " tidak ditemukan — tekan menunya lagi untuk coba lagi");
                 return;
             }
             ui.postDelayed(this, SCAN_INTERVAL_MS);
@@ -1190,7 +1210,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void startBromDump() {
         if (brom == null) {
-            toast("Sambungkan BROM dulu, HP harus di mode BROM");
+            standbyFor(KIND_BROM, this::startBromDump, "dump BROM");
             return;
         }
         if (scatter == null) {
