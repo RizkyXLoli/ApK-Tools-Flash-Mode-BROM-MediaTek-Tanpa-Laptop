@@ -24,7 +24,7 @@ if [ -z "${PLATFORM:-}" ] || [ ! -f "$PLATFORM" ]; then
 fi
 
 if [ -z "${JAVA_HOME:-}" ] || [ ! -x "$JAVA_HOME/bin/javac" ]; then
-  for j in /usr/lib/jvm/java-21-openjdk-amd64 /usr/lib/jvm/java-17-openjdk-amd64; do
+  for j in /usr/lib/jvm/java-17-openjdk-amd64 /usr/lib/jvm/java-11-openjdk-amd64 /usr/lib/jvm/java-21-openjdk-amd64; do
     [ -x "$j/bin/javac" ] && { JAVA_HOME="$j"; break; }
   done
 fi

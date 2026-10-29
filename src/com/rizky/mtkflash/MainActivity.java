@@ -59,6 +59,25 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private static final int REQ_DA = 1004;
     private static final int REQ_BROM_OUT = 1005;
 
+    private static final int KIND_FB = 1;
+    private static final int KIND_BROM = 2;
+    private static final int SCAN_INTERVAL_MS = 800;
+    private static final int SCAN_TIMEOUT_S = 40;
+
+    private static final String BG = "#0f1216";
+    private static final String PANEL = "#151a21";
+    private static final String PANEL_ALT = "#12161c";
+    private static final String LOG_BG = "#0b0e12";
+    private static final String ACCENT = "#5eead4";
+    private static final String STATUS = "#98a1ad";
+    private static final String TEXT = "#e7edf5";
+    private static final String SUBTEXT = "#98a1ad";
+    private static final String BTN_FILL = "#1a2027";
+    private static final String BTN_STROKE = "#2c3542";
+    private static final String HEAD_BG = "#1b222c";
+    private static final String PRIMARY_FILL = "#1f6feb";
+    private static final String PRIMARY_STROKE = "#2f81f7";
+
     private static final Set<String> BROM_ONLY = new HashSet<>(Arrays.asList(
             "preloader", "pgpt", "sgpt", "boot_para", "nvram", "nvdata", "nvcfg",
             "protect1", "protect2", "seccfg", "persist", "proinfo", "expdb",
@@ -80,7 +99,12 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     private UsbTransport transport;
     private BromProtocol brom;
     private FastbootProtocol fastboot;
-    private boolean wantFastboot = false;
+    private UsbDevice bromDevice;
+    private UsbDevice fbDevice;
+
+    private boolean scanning;
+    private int scanKind;
+    private int scanElapsed;
 
     private TextView statusView;
     private TextView logView;
@@ -118,19 +142,25 @@ public class MainActivity extends Activity implements BromProtocol.Log {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 boolean ok = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                 if (ok && d != null) {
-                    if (wantFastboot) openFastboot(d);
+                    if (FastbootProtocol.isFastboot(d)) openFastboot(d);
                     else openBrom(d);
                 } else {
-                    log("izin USB ditolak untuk " + (d == null ? "?" : d.getDeviceName()));
+                    log("izin USB ditolak. Sambungkan lagi, lalu tekan Izinkan saat muncul.");
                 }
-            } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
-                UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                log("perangkat tersambung: " + (d == null ? "?" : d.getDeviceName()));
-                refreshDeviceList();
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
-                log("perangkat terlepas");
-                closeTransport();
-                refreshDeviceList();
+                UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                String n = d == null ? "" : d.getDeviceName();
+                if (bromDevice != null && n.equals(bromDevice.getDeviceName())) {
+                    disconnectBrom();
+                    log("HP (BROM) terlepas.");
+                    status("BROM terputus");
+                } else if (fbDevice != null && n.equals(fbDevice.getDeviceName())) {
+                    disconnectFb();
+                    log("HP (fastboot) terlepas.");
+                    status("fastboot terputus");
+                } else {
+                    status("ada perangkat USB terlepas");
+                }
             }
         }
     };
@@ -143,7 +173,6 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
         IntentFilter f = new IntentFilter();
         f.addAction(ACTION_USB_PERM);
-        f.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
         f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(usbReceiver, f, Context.RECEIVER_NOT_EXPORTED);
@@ -151,14 +180,12 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             registerReceiver(usbReceiver, f);
         }
 
-        log("MTK Flash siap. Alurnya sama seperti versi PC:");
-        log("1) ekstrak dulu file ROM hasil download (zip/rar)");
-        log("2) tekan Pilih file scatter, cari scatter .txt atau .xml");
-        log("3) aplikasi baca scatter dan menampilkan daftar partisi");
-        log("4) centang partisi yang mau ditulis");
-        log("5) colok HP dalam mode fastboot, tekan FB scan");
-        log("6) tekan Flash terpilih");
-        refreshDeviceList();
+        log("MTK Flash siap. Cara pakai:");
+        log("1) Pastikan HP dalam keadaan mati, kabel belum dicolok.");
+        log("2) Pilih menu dulu: Sambungkan Fastboot atau Sambungkan BROM.");
+        log("3) Aplikasi lalu mencari HP kamu sampai ketemu, ikuti petunjuk di layar.");
+        log("4) Untuk flash: pilih file scatter atau folder ROM di menu File ROM.");
+        status("pilih menu untuk mulai");
     }
 
     @Override
@@ -167,88 +194,113 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             unregisterReceiver(usbReceiver);
         } catch (Exception ignored) {
         }
-        closeTransport();
+        disconnectAll();
         super.onDestroy();
     }
 
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.parseColor("#12141a"));
-        root.setPadding(dp(12), dp(12), dp(12), dp(8));
+        root.setBackgroundColor(Color.parseColor(BG));
+        root.setPadding(dp(12), dp(10), dp(12), dp(8));
 
         TextView title = new TextView(this);
         title.setText("MTK Flash");
-        title.setTextColor(Color.parseColor("#7fd1ff"));
-        title.setTextSize(17);
+        title.setTextColor(Color.parseColor(ACCENT));
+        title.setTextSize(19);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(title);
 
         statusView = new TextView(this);
-        statusView.setText("belum tersambung");
-        statusView.setTextColor(Color.parseColor("#9aa4b2"));
+        statusView.setText("pilih menu untuk mulai");
+        statusView.setTextColor(Color.parseColor(STATUS));
         statusView.setTextSize(12);
-        statusView.setPadding(0, dp(4), 0, dp(8));
+        statusView.setPadding(0, dp(4), 0, dp(4));
         root.addView(statusView);
 
-        root.addView(row(
-                btn("Pilih file scatter", this::doPickScatter),
-                btn("Pilih folder ROM", this::doPickFolder),
-                btn("Muat ulang", this::reloadRom),
-                btn("Centang siap", this::checkReady),
-                btn("Kosongkan", this::clearChecks)));
+        root.addView(section("1 · Sambungkan"));
+        root.addView(pairRow(
+                bigBtn("Sambungkan Fastboot", this::doFastbootScan),
+                bigBtn("Sambungkan BROM", this::doConnectBrom)));
+        TextView hint = new TextView(this);
+        hint.setText("Pilih salah satu menu dulu. HP kamu dicari otomatis sampai ketemu.");
+        hint.setTextColor(Color.parseColor(SUBTEXT));
+        hint.setTextSize(11);
+        hint.setPadding(0, dp(2), 0, dp(6));
+        root.addView(hint);
 
+        root.addView(section("2 · File ROM"));
+        root.addView(row(
+                btn("Pilih scatter", this::doPickScatter),
+                btn("Pilih folder ROM", this::doPickFolder),
+                btn("Muat ulang", this::reloadRom)));
+
+        root.addView(section("3 · Partisi"));
         romView = new TextView(this);
         romView.setText("belum ada file scatter dipilih");
-        romView.setTextColor(Color.parseColor("#9aa4b2"));
+        romView.setTextColor(Color.parseColor(SUBTEXT));
         romView.setTextSize(11);
-        romView.setPadding(0, dp(6), 0, dp(4));
+        romView.setPadding(0, dp(2), 0, dp(4));
         root.addView(romView);
+
+        root.addView(row(
+                btn("Centang siap", this::checkReady),
+                btn("Kosongkan", this::clearChecks)));
 
         tableBox = new LinearLayout(this);
         tableBox.setOrientation(LinearLayout.VERTICAL);
         ScrollView tableScroll = new ScrollView(this);
         tableScroll.addView(tableBox);
-        tableScroll.setBackgroundColor(Color.parseColor("#171b22"));
+        tableScroll.setBackgroundColor(Color.parseColor(PANEL));
         tableScroll.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 3f));
         root.addView(tableScroll);
 
-        flashBtn = btn("Flash terpilih", this::confirmFlash);
+        root.addView(section("4 · Aksi"));
         modeBtn = btn("Mode: " + mode.label, this::pickMode);
+        flashBtn = btn("Flash terpilih", this::confirmFlash);
         root.addView(row(
-                btn("FB scan", this::doFastbootScan),
-                btn("FB info", this::doFastbootInfo),
                 modeBtn,
                 flashBtn,
-                btn("Putus", this::doDisconnect)));
+                btn("FB info", this::doFastbootInfo)));
+        root.addView(row(
+                btn("Dump partisi", this::startDump),
+                btn("Info chip", this::doChipInfo),
+                btn("Bypass auth", () -> doBypassAuth(false))));
+        root.addView(row(
+                btn("Bypass kamakiri2", () -> doBypassAuth(true)),
+                btn("Dump BROM", this::startBromDump),
+                btn("Terminal", this::openTerminal)));
+        root.addView(row(
+                btn("Putus FB", this::disconnectFbUi),
+                btn("Putus BROM", this::disconnectBromUi),
+                btn("Putus semua", this::doDisconnect)));
 
         logView = new TextView(this);
-        logView.setTextColor(Color.parseColor("#c8d3e0"));
+        logView.setTextColor(Color.parseColor("#c9d4e0"));
         logView.setTextSize(11);
         logView.setTypeface(Typeface.MONOSPACE);
         logView.setMovementMethod(new ScrollingMovementMethod());
         logView.setTextIsSelectable(true);
         ScrollView logScroll = new ScrollView(this);
         logScroll.addView(logView);
-        logScroll.setBackgroundColor(Color.parseColor("#0d0f14"));
+        logScroll.setBackgroundColor(Color.parseColor(LOG_BG));
         logScroll.setPadding(dp(6), dp(6), dp(6), dp(6));
         logScroll.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 2f));
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.6f));
         root.addView(logScroll);
 
-        root.addView(row(
-                btn("Connect BROM", this::doConnectBrom),
-                btn("Info chip", this::doChipInfo),
-                btn("Dump partisi", this::startDump),
-                btn("Dump BROM", this::startBromDump),
-                btn("Terminal", this::openTerminal)));
-
-        root.addView(row(
-                btn("Bypass auth", () -> doBypassAuth(false)),
-                btn("Bypass kamakiri2", () -> doBypassAuth(true))));
-
         return root;
+    }
+
+    private TextView section(String label) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextColor(Color.parseColor(ACCENT));
+        t.setTextSize(12);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setPadding(0, dp(10), 0, dp(4));
+        return t;
     }
 
     private Button btn(String text, Runnable action) {
@@ -256,11 +308,27 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         b.setText(text);
         b.setAllCaps(false);
         b.setTextSize(11);
-        b.setTextColor(Color.parseColor("#dfe6f2"));
-        b.setBackground(cellBg("#1c2230", "#2c3547"));
+        b.setTextColor(Color.parseColor(TEXT));
+        b.setBackground(cellBg(BTN_FILL, BTN_STROKE));
         b.setStateListAnimator(null);
         b.setIncludeFontPadding(false);
         b.setGravity(Gravity.CENTER);
+        b.setOnClickListener(v -> action.run());
+        return b;
+    }
+
+    private Button bigBtn(String text, Runnable action) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextSize(12);
+        b.setTextColor(Color.WHITE);
+        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setBackground(cellBg(PRIMARY_FILL, PRIMARY_STROKE));
+        b.setStateListAnimator(null);
+        b.setIncludeFontPadding(false);
+        b.setGravity(Gravity.CENTER);
+        b.setPadding(dp(6), dp(10), dp(6), dp(10));
         b.setOnClickListener(v -> action.run());
         return b;
     }
@@ -272,6 +340,24 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         d.setColor(Color.parseColor(fill));
         d.setStroke(dp(1), Color.parseColor(stroke));
         return d;
+    }
+
+    private View pairRow(Button a, Button b) {
+        LinearLayout line = new LinearLayout(this);
+        line.setOrientation(LinearLayout.HORIZONTAL);
+        line.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        for (Button x : new Button[]{a, b}) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(48), 1f);
+            lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+            x.setLayoutParams(lp);
+            x.setMinWidth(0);
+            x.setMinimumWidth(0);
+            x.setMinHeight(0);
+            x.setMinimumHeight(0);
+            line.addView(x);
+        }
+        return line;
     }
 
     private View row(Button... buttons) {
@@ -334,7 +420,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     @Override
     public void e(String s) {
-        log("ERROR: " + s);
+        log("GAGAL: " + s);
     }
 
     private void doPickScatter() {
@@ -560,11 +646,11 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         h.setOrientation(LinearLayout.HORIZONTAL);
         h.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(28)));
-        h.setBackgroundColor(Color.parseColor("#1d2431"));
-        h.addView(cell("", COL_CHECK, 0f, Gravity.START, "#7d8aa0", 9));
-        h.addView(cell("partisi", 0, W_NAME, Gravity.START, "#7d8aa0", 9));
-        h.addView(cell("image", 0, W_FILE, Gravity.START, "#7d8aa0", 9));
-        h.addView(cell("ukuran", 0, W_SIZE, Gravity.END, "#7d8aa0", 9));
+        h.setBackgroundColor(Color.parseColor(HEAD_BG));
+        h.addView(cell("", COL_CHECK, 0f, Gravity.START, "#8b98aa", 9));
+        h.addView(cell("partisi", 0, W_NAME, Gravity.START, "#8b98aa", 9));
+        h.addView(cell("image", 0, W_FILE, Gravity.START, "#8b98aa", 9));
+        h.addView(cell("ukuran", 0, W_SIZE, Gravity.END, "#8b98aa", 9));
         return h;
     }
 
@@ -573,7 +659,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         line.setOrientation(LinearLayout.HORIZONTAL);
         line.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(36)));
-        line.setBackgroundColor(Color.parseColor(alt ? "#1a1f29" : "#171b22"));
+        line.setBackgroundColor(Color.parseColor(alt ? PANEL_ALT : PANEL));
 
         boolean usable = r.file != null && !r.blocked;
 
@@ -596,11 +682,11 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         if (!r.note.isEmpty()) img = img + " " + r.note;
 
         line.addView(cell(r.p.name, 0, W_NAME, Gravity.START,
-                usable ? "#dfe6f2" : "#5d6779", 10));
+                usable ? "#e7edf5" : "#6a7484", 10));
         line.addView(cell(img, 0, W_FILE, Gravity.START,
-                usable ? "#9fb0c6" : "#4f596b", 10));
+                usable ? "#a6b7c9" : "#5b6677", 10));
         line.addView(cell(size, 0, W_SIZE, Gravity.END,
-                usable ? "#8fd3a0" : "#4f596b", 10));
+                usable ? "#7ee787" : "#5b6677", 10));
 
         line.setOnClickListener(v -> {
             if (cb.isEnabled()) cb.toggle();
@@ -668,7 +754,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void confirmFlash() {
         if (fastboot == null) {
-            toast("FB scan dulu, HP harus di mode fastboot");
+            toast("Sambungkan Fastboot dulu, HP harus di mode fastboot");
             return;
         }
         List<Row> pick = new ArrayList<>();
@@ -766,7 +852,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void startDump() {
         if (fastboot == null) {
-            toast("FB scan dulu, HP harus di mode fastboot");
+            toast("Sambungkan Fastboot dulu, HP harus di mode fastboot");
             return;
         }
         final List<String> q = new ArrayList<>();
@@ -850,45 +936,24 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     }
 
     private void doFastbootScan() {
-        UsbDevice target = null;
-        for (UsbDevice d : usbManager.getDeviceList().values()) {
-            if (FastbootProtocol.isFastboot(d)) {
-                target = d;
-                break;
-            }
-        }
-        if (target == null) {
-            log("tidak ada perangkat dengan antarmuka fastboot (FF/42/03)");
-            log("pastikan HP sudah di mode fastboot/bootloader");
-            status("fastboot tidak ditemukan");
-            return;
-        }
-        wantFastboot = true;
-        if (usbManager.hasPermission(target)) {
-            openFastboot(target);
-        } else {
-            int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
-            PendingIntent pi = PendingIntent.getBroadcast(this, 0,
-                    new Intent(ACTION_USB_PERM).setPackage(getPackageName()), flags);
-            usbManager.requestPermission(target, pi);
-            status("menunggu izin USB");
-        }
+        beginSearch(KIND_FB);
     }
 
     private void openFastboot(UsbDevice d) {
         runBg("buka fastboot", () -> {
-            closeTransport();
+            disconnectFb();
             FastbootProtocol fb = new FastbootProtocol(usbManager, d);
             fastboot = fb;
-            log("fastboot terhubung: " + d.getDeviceName());
-            log(String.format(Locale.US, "  %-20s %s", "product", safeGetVar(fb, "product")));
-            log(String.format(Locale.US, "  %-20s %s", "unlocked", safeGetVar(fb, "unlocked")));
-            log(String.format(Locale.US, "  %-20s %s", "max-download-size",
+            fbDevice = d;
+            log("HP fastboot tersambung.");
+            log(String.format(Locale.US, "  %-20s %s", "produk", safeGetVar(fb, "product")));
+            log(String.format(Locale.US, "  %-20s %s", "terbuka", safeGetVar(fb, "unlocked")));
+            log(String.format(Locale.US, "  %-20s %s", "ukuran unduh",
                     safeGetVar(fb, "max-download-size")));
             if ("no".equalsIgnoreCase(safeGetVar(fb, "unlocked"))) {
                 log("bootloader masih terkunci, flash akan ditolak.");
             }
-            status("fastboot siap");
+            status("fastboot siap — lanjut pilih menu Flash / Dump");
             return null;
         });
     }
@@ -903,7 +968,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void doFastbootInfo() {
         if (fastboot == null) {
-            toast("FB scan dulu");
+            toast("Sambungkan Fastboot dulu");
             return;
         }
         runBg("fb info", () -> {
@@ -919,70 +984,38 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     }
 
     private void doConnectBrom() {
-        UsbDevice target = null;
-        for (UsbDevice d : usbManager.getDeviceList().values()) {
-            if (d.getVendorId() == UsbTransport.MTK_VID) {
-                target = d;
-                break;
-            }
-        }
-        if (target == null) {
-            log("BROM tidak terdeteksi: tidak ada USB dengan VID 0x0E8D");
-            log("yang perlu dicek: OTG nyala, kabel data (bukan kabel charge), "
-                    + "HP target sudah dimatikan lalu dicolok sambil tahan volume");
-            log("perangkat USB yang terbaca sekarang:");
-            int n = 0;
-            for (UsbDevice d : usbManager.getDeviceList().values()) {
-                n++;
-                log(String.format(Locale.US, "  %04X:%04X  %s",
-                        d.getVendorId(), d.getProductId(),
-                        d.getProductName() == null ? "?" : d.getProductName()));
-            }
-            if (n == 0) log("  (kosong, tidak ada apa pun di port OTG)");
-            status("BROM tidak ditemukan");
-            return;
-        }
-        wantFastboot = false;
-        if (usbManager.hasPermission(target)) {
-            openBrom(target);
-        } else {
-            int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
-            PendingIntent pi = PendingIntent.getBroadcast(this, 0,
-                    new Intent(ACTION_USB_PERM).setPackage(getPackageName()), flags);
-            usbManager.requestPermission(target, pi);
-            status("menunggu izin USB");
-        }
+        beginSearch(KIND_BROM);
     }
 
     private void openBrom(UsbDevice d) {
         runBg("buka BROM", () -> {
-            closeTransport();
+            disconnectBrom();
             UsbTransport t = new UsbTransport(usbManager, d);
-            brom = new BromProtocol(t, this);
+            BromProtocol bp = new BromProtocol(t, this);
             transport = t;
-            log("BROM terhubung: " + d.getDeviceName()
-                    + String.format(Locale.US, " (VID %04X PID %04X)",
-                    d.getVendorId(), d.getProductId()));
-            status("BROM siap");
+            brom = bp;
+            bromDevice = d;
+            log("HP tersambung (mode BROM).");
+            status("BROM siap — lanjut pilih menu Info chip / Bypass / Dump BROM");
             return null;
         });
     }
 
     private void doChipInfo() {
         if (brom == null) {
-            toast("Connect BROM dulu");
+            toast("Sambungkan BROM dulu");
             return;
         }
         runBg("info chip", () -> {
             brom.handshake(4);
-            log(String.format(Locale.US, "BROM version  : 0x%04X", brom.getBromVersion()));
-            log(String.format(Locale.US, "HW code       : 0x%04X", brom.getHwCode()));
+            log(String.format(Locale.US, "Versi BROM     : 0x%04X", brom.getBromVersion()));
+            log(String.format(Locale.US, "Kode chip      : 0x%04X", brom.getHwCode()));
             int[] v = brom.getHwSwVersion();
-            log(String.format(Locale.US, "HW/SW version : 0x%04X / 0x%04X", v[0], v[1]));
+            log(String.format(Locale.US, "Versi HW/SW    : 0x%04X / 0x%04X", v[0], v[1]));
             try {
-                log(String.format(Locale.US, "Target config : 0x%08X", brom.getTargetConfig()));
+                log(String.format(Locale.US, "Konfigurasi    : 0x%08X", brom.getTargetConfig()));
             } catch (Exception e) {
-                log("target config tidak didukung chip ini");
+                log("konfigurasi tidak didukung chip ini");
             }
             status("info chip selesai");
             return null;
@@ -991,7 +1024,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void doBypassAuth(boolean kamakiri2) {
         if (brom == null || transport == null) {
-            toast("Connect BROM dulu");
+            toast("Sambungkan BROM dulu");
             return;
         }
         final boolean useK2 = kamakiri2;
@@ -1009,7 +1042,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
             log("=== hasil bypass ===");
             for (String line : r.summary().split("\n")) log(line);
             if (!r.evidence.isEmpty()) {
-                log("--- evidence ---");
+                log("--- bukti ---");
                 for (String e : r.evidence) log("  " + e);
             }
             status(r.success ? "bypass OK" : "bypass gagal");
@@ -1019,14 +1052,25 @@ public class MainActivity extends Activity implements BromProtocol.Log {
     }
 
     private void doDisconnect() {
-        closeTransport();
-        status("terputus");
+        disconnectAll();
+        status("semua koneksi diputus");
+    }
+
+    private void disconnectFbUi() {
+        boolean had = fastboot != null;
+        disconnectFb();
+        status(had ? "fastboot diputus" : "fastboot belum tersambung");
+    }
+
+    private void disconnectBromUi() {
+        boolean had = brom != null;
+        disconnectBrom();
+        status(had ? "BROM diputus" : "BROM belum tersambung");
     }
 
     private void openTerminal() {
         if (transport != null || fastboot != null) {
-            closeTransport();
-            status("koneksi dilepas untuk terminal");
+            log("Terminal dibuka. Koneksi lain tetap aktif.");
         }
         try {
             startActivity(new Intent(this, TerminalActivity.class));
@@ -1035,24 +1079,81 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         }
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        refreshDeviceList();
+    private void beginSearch(int kind) {
+        scanning = true;
+        scanKind = kind;
+        scanElapsed = 0;
+        String t = kind == KIND_FB ? "fastboot" : "mode BROM";
+        log("mencari HP (" + t + ")...");
+        if (kind == KIND_FB) {
+            log("matikan HP, tahan Volume Turun + Power sampai masuk mode fastboot,");
+            log("lalu colok kabel data OTG.");
+        } else {
+            log("matikan HP, colok kabel OTG sambil tahan tombol (Volume + Power)");
+            log("sampai masuk mode BROM.");
+        }
+        status("mencari HP (" + t + ")...");
+        ui.postDelayed(scanTick, SCAN_INTERVAL_MS);
     }
 
-    private void closeTransport() {
-        FastbootProtocol fb = fastboot;
-        fastboot = null;
-        if (fb != null) {
-            try {
-                fb.close();
-            } catch (Exception ignored) {
+    private final Runnable scanTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!scanning) return;
+            UsbDevice d = scanKind == KIND_FB ? findFastboot() : findMtk();
+            if (d != null) {
+                scanning = false;
+                status("ketemu — menghubungkan...");
+                grantAndOpen(d, scanKind);
+                return;
             }
+            scanElapsed++;
+            status("mencari HP... " + scanElapsed + " dtk (masih belum ketemu)");
+            if (scanElapsed >= SCAN_TIMEOUT_S) {
+                scanning = false;
+                String t = scanKind == KIND_FB ? "fastboot" : "mode BROM";
+                log("HP tidak terdeteksi selama " + scanElapsed + " detik.");
+                log("Cek: kabel itu kabel data (bukan charger), HP sudah mati,");
+                log("dan sudah dicolok sambil menahan tombol yang benar (" + t + ").");
+                status(t + " tidak ditemukan — tekan menu Sambungkan untuk coba lagi");
+                return;
+            }
+            ui.postDelayed(this, SCAN_INTERVAL_MS);
         }
+    };
+
+    private UsbDevice findFastboot() {
+        for (UsbDevice d : usbManager.getDeviceList().values()) {
+            if (FastbootProtocol.isFastboot(d)) return d;
+        }
+        return null;
+    }
+
+    private UsbDevice findMtk() {
+        for (UsbDevice d : usbManager.getDeviceList().values()) {
+            if (d.getVendorId() == UsbTransport.MTK_VID) return d;
+        }
+        return null;
+    }
+
+    private void grantAndOpen(UsbDevice d, int kind) {
+        if (usbManager.hasPermission(d)) {
+            if (kind == KIND_FB) openFastboot(d);
+            else openBrom(d);
+        } else {
+            int flags = Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0;
+            PendingIntent pi = PendingIntent.getBroadcast(this, 0,
+                    new Intent(ACTION_USB_PERM).setPackage(getPackageName()), flags);
+            usbManager.requestPermission(d, pi);
+            status("menunggu izin USB — tekan Izinkan di HP");
+        }
+    }
+
+    private void disconnectBrom() {
         UsbTransport t = transport;
         transport = null;
         brom = null;
+        bromDevice = null;
         if (t != null) {
             try {
                 t.close();
@@ -1061,16 +1162,21 @@ public class MainActivity extends Activity implements BromProtocol.Log {
         }
     }
 
-    private void refreshDeviceList() {
-        int mtk = 0, fb = 0;
-        for (UsbDevice d : usbManager.getDeviceList().values()) {
-            if (d.getVendorId() == UsbTransport.MTK_VID) mtk++;
-            if (FastbootProtocol.isFastboot(d)) fb++;
+    private void disconnectFb() {
+        FastbootProtocol fb = fastboot;
+        fastboot = null;
+        fbDevice = null;
+        if (fb != null) {
+            try {
+                fb.close();
+            } catch (Exception ignored) {
+            }
         }
-        status(String.format(Locale.US, "perangkat: %d MediaTek, %d fastboot", mtk, fb));
-        if (mtk > 0 || fb > 0) {
-            log(String.format(Locale.US, "USB: %d MediaTek, %d fastboot", mtk, fb));
-        }
+    }
+
+    private void disconnectAll() {
+        disconnectBrom();
+        disconnectFb();
     }
 
     private List<BromDump.Target> bromTargets() {
@@ -1084,7 +1190,7 @@ public class MainActivity extends Activity implements BromProtocol.Log {
 
     private void startBromDump() {
         if (brom == null) {
-            toast("Connect BROM dulu, HP harus di mode BROM");
+            toast("Sambungkan BROM dulu, HP harus di mode BROM");
             return;
         }
         if (scatter == null) {
